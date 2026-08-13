@@ -267,13 +267,21 @@ def human_review(state: AgentState):
   `.with_structured_output()`
 - **DB:** SQLite (local dev) → Postgres (later)
 - **Checkpointer:** `MemorySaver` → `SqliteSaver`/`PostgresSaver`
-- **Interface:** Gradio app
+- **Interface:** Gradio app, chat-style (WhatsApp-like transcript)
   - Login gate via `gr.Blocks().launch(auth=<callable>)` — `client_name` +
     one shared password for all clients (v1 only, no per-client
     credentials, no auth table)
-  - Kicks off a run, renders whichever of the 3 `human_review` stages the
-    graph is interrupted at, and submits the decision
-    (approve/edit/reject) via `Command(resume=...)`
+  - A small structured form (channel + campaign topic) kicks off a run.
+    From there the whole `human_review` loop is one continuous
+    `gr.Chatbot` transcript: each interrupt's payload renders as a
+    bulleted markdown message on the right (`role="user"` in Gradio's
+    convention); the human types free text in a single message box,
+    rendered on the left (`role="assistant"`) — no approve/edit/reject
+    buttons.
+  - Each human message triggers one additional LLM call (on top of the
+    agents' own calls) that classifies it into approve/edit/reject before
+    resuming via `Command(resume=...)`; the raw message is reused verbatim
+    as `human_edit_notes` when the result is `edit`.
 - **Deployment:** Dockerized (single container running the Gradio app;
   SQLite file on a mounted volume, `OPENAI_API_KEY` passed through env)
 

@@ -64,6 +64,29 @@ class _FakeComplianceLLM:
         return ComplianceResult(passed=True, issues=[], severity="none")
 
 
+class _FakeDecisionLLM:
+    """Crude keyword-based stand-in for the UI's free-text ->
+    approve/edit/reject classifier. The real one uses an LLM; tests just
+    need something deterministic. Must isolate the human's quoted message
+    from the surrounding prompt -- the instructions themselves contain the
+    words "approve"/"edit"/"reject", so keyword-matching the whole prompt
+    would always hit "reject" first regardless of what was actually said."""
+
+    def invoke(self, prompt):
+        from content_agent.ui import _DecisionClassification
+
+        try:
+            message = prompt.split('message:\n\n"', 1)[1].rsplit('"\n\nClassify', 1)[0]
+        except IndexError:
+            message = prompt
+        lowered = message.lower()
+        if "reject" in lowered or "cancel" in lowered or "kill" in lowered:
+            return _DecisionClassification(action="reject")
+        if "approve" in lowered or "looks good" in lowered or "great" in lowered:
+            return _DecisionClassification(action="approve")
+        return _DecisionClassification(action="edit")
+
+
 @pytest.fixture(autouse=True)
 def _fake_llms(monkeypatch):
     """Default deterministic stand-ins for every real LLM call so the graph
@@ -76,3 +99,4 @@ def _fake_llms(monkeypatch):
         {"whatsapp": _FakeCreationLLM("whatsapp"), "push": _FakeCreationLLM("push")},
     )
     monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _FakeComplianceLLM())
+    monkeypatch.setattr("content_agent.ui._structured_decision_llm", _FakeDecisionLLM())

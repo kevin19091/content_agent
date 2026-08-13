@@ -1,9 +1,12 @@
 import os
 import uuid
+from typing import Literal, Optional
 
 import gradio as gr
 from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
 from langgraph.types import Command
+from pydantic import BaseModel
 
 from content_agent.db import init_db
 from content_agent.graph import compile_app
@@ -15,6 +18,74 @@ _SHARED_PASSWORD = os.environ.get("CONTENT_AGENT_SHARED_PASSWORD", "changeme")
 _app = compile_app()
 
 
+class _DecisionClassification(BaseModel):
+    action: Literal["approve", "edit", "reject"]
+
+
+_decision_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+_structured_decision_llm = _decision_llm.with_structured_output(_DecisionClassification)
+
+_STAGE_DESCRIPTIONS = {
+    "ideation": "the proposed content angle and brief",
+    "creation": "a draft of the actual copy",
+    "compliance": "a brand/channel compliance check result",
+}
+
+
+def _classify_decision(stage: str, message: str) -> str:
+    """Free-text -> approve/edit/reject. The raw message itself is reused
+    verbatim as human_edit_notes when the result is 'edit' -- this call
+    only decides which of the three actions was meant."""
+    prompt = (
+        f"A human is reviewing {_STAGE_DESCRIPTIONS.get(stage, 'an agent output')} "
+        f"in a content approval workflow and just sent this message:\n\n\"{message}\"\n\n"
+        "Classify their intent as exactly one of:\n"
+        "- approve: satisfied, move on as-is\n"
+        "- edit: wants changes; their message is the feedback to act on\n"
+        "- reject: wants to kill this campaign entirely, not just request changes"
+    )
+    return _structured_decision_llm.invoke(prompt).action
+
+
+def _bullets(d: dict) -> str:
+    lines = []
+    for k, v in d.items():
+        if v is None:
+            continue
+        label = k.replace("_", " ").title()
+        if isinstance(v, list):
+            if not v:
+                continue
+            lines.append(f"- **{label}:** {'; '.join(str(x) for x in v)}")
+        else:
+            lines.append(f"- **{label}:** {v}")
+    return "\n".join(lines) if lines else "- (none)"
+
+
+def _format_agent_message(payload: dict) -> str:
+    stage = payload["stage"]
+
+    if stage == "ideation":
+        fields = {"angle": payload.get("angle"), **(payload.get("brief") or {})}
+        return "**Proposed angle & brief**\n" + _bullets(fields)
+
+    if stage == "creation":
+        return "**Draft content**\n" + _bullets(payload.get("draft_content") or {})
+
+    if stage == "compliance":
+        cr = payload.get("compliance_result") or {}
+        lines = [f"- **Passed:** {cr.get('passed')}", f"- **Severity:** {cr.get('severity')}"]
+        issues = cr.get("issues") or []
+        if issues:
+            lines.append("- **Issues:**")
+            lines.extend(f"  - {issue}" for issue in issues)
+        else:
+            lines.append("- **Issues:** none")
+        return "**Compliance review**\n" + "\n".join(lines)
+
+    return "**Update**\n" + _bullets(payload)
+
+
 def _authenticate(username: str, password: str) -> bool:
     """PRD §8, §9 -- client_name + one shared password for all clients, v1
     only. The username becomes client_id for the session; it isn't checked
@@ -23,37 +94,20 @@ def _authenticate(username: str, password: str) -> bool:
     return bool(username) and password == _SHARED_PASSWORD
 
 
-def _render(result: dict, thread_id: str):
-    """Map a graph result (either an interrupt or a finished run) onto the
-    three panels: start / review / done."""
+def _append_result(result: dict, thread_id: str, history: list):
+    """Agent turns render on the right (role='user' in Gradio's chat
+    convention) -- human turns render on the left (role='assistant')."""
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
-        return (
-            gr.update(visible=False),  # start_group
-            gr.update(visible=True),  # review_group
-            gr.update(visible=False),  # done_group
-            f"### Review: `{payload['stage']}` stage",
-            payload,
-            "",  # clear notes box
-            thread_id,
-        )
+        history = history + [{"role": "user", "content": _format_agent_message(payload)}]
+        return history, thread_id, payload["stage"], ""
 
     if result.get("final_content") is not None:
-        outcome = "### ✅ Approved\n`final_content` persisted, ready for delivery."
-        content = result["final_content"]
+        msg = "✅ **Approved** -- final content persisted, ready for delivery:\n" + _bullets(result["final_content"])
     else:
-        outcome = "### ⛔ Rejected\nNo content persisted. Logged + client notified."
-        content = None
-
-    return (
-        gr.update(visible=False),
-        gr.update(visible=False),
-        gr.update(visible=True),
-        outcome,
-        content,
-        "",
-        thread_id,
-    )
+        msg = "⛔ **Rejected** -- no content persisted. Logged + client notified."
+    history = history + [{"role": "user", "content": msg}]
+    return history, thread_id, None, ""
 
 
 def _start_campaign(channel: str, campaign_topic: str, request: gr.Request):
@@ -64,6 +118,8 @@ def _start_campaign(channel: str, campaign_topic: str, request: gr.Request):
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
+    history = [{"role": "assistant", "content": f"Start a **{channel}** campaign: {campaign_topic}"}]
+
     try:
         result = _app.invoke(
             {"request": {"client_id": client_id, "channel": channel, "campaign_topic": campaign_topic}},
@@ -72,32 +128,26 @@ def _start_campaign(channel: str, campaign_topic: str, request: gr.Request):
     except ValueError as e:
         raise gr.Error(str(e))
 
-    return _render(result, thread_id)
+    return _append_result(result, thread_id, history)
 
 
-def _submit_decision(action: str, notes: str, thread_id: str):
-    if action == "edit" and not (notes and notes.strip()):
-        raise gr.Error("Notes are required when choosing Edit.")
+def _submit_message(message: str, thread_id: Optional[str], stage: Optional[str], history: list):
+    if not thread_id or not stage:
+        raise gr.Error("Start a campaign first.")
+    if not message or not message.strip():
+        raise gr.Error("Type a message first.")
 
-    config = {"configurable": {"thread_id": thread_id}}
+    history = history + [{"role": "assistant", "content": message}]
+
+    action = _classify_decision(stage, message)
     resume = {"action": action}
     if action == "edit":
-        resume["notes"] = notes
+        resume["notes"] = message
 
+    config = {"configurable": {"thread_id": thread_id}}
     result = _app.invoke(Command(resume=resume), config=config)
-    return _render(result, thread_id)
 
-
-def _reset():
-    return (
-        gr.update(visible=True),
-        gr.update(visible=False),
-        gr.update(visible=False),
-        "",
-        None,
-        "",
-        None,
-    )
+    return _append_result(result, thread_id, history)
 
 
 def _on_load(request: gr.Request):
@@ -110,35 +160,29 @@ def build_app() -> gr.Blocks:
         client_id_md = gr.Markdown()
 
         thread_state = gr.State(None)
+        stage_state = gr.State(None)
 
-        with gr.Group() as start_group:
-            gr.Markdown("### New campaign")
+        with gr.Accordion("New campaign", open=True):
             channel_dd = gr.Dropdown(["whatsapp", "push"], value="whatsapp", label="Channel")
             topic_tb = gr.Textbox(label="Campaign topic", placeholder="e.g. end of season clearance sale")
             start_btn = gr.Button("Start campaign", variant="primary")
 
-        with gr.Group(visible=False) as review_group:
-            stage_md = gr.Markdown()
-            payload_json = gr.JSON(label="Details")
-            notes_tb = gr.Textbox(label="Edit notes", placeholder="Required only if choosing Edit")
-            with gr.Row():
-                approve_btn = gr.Button("Approve", variant="primary")
-                edit_btn = gr.Button("Edit")
-                reject_btn = gr.Button("Reject", variant="stop")
+        chatbot = gr.Chatbot(type="messages", label="Review", height=500)
 
-        with gr.Group(visible=False) as done_group:
-            outcome_md = gr.Markdown()
-            final_json = gr.JSON(label="Final content")
-            new_campaign_btn = gr.Button("Start another campaign")
-
-        outputs = [start_group, review_group, done_group, stage_md, payload_json, notes_tb, thread_state]
+        with gr.Row():
+            msg_tb = gr.Textbox(
+                placeholder='Message the agent... e.g. "approve", "make it punchier", "reject this"',
+                scale=8,
+                show_label=False,
+            )
+            send_btn = gr.Button("Send", scale=1)
 
         demo.load(_on_load, outputs=[client_id_md])
-        start_btn.click(_start_campaign, inputs=[channel_dd, topic_tb], outputs=outputs)
-        approve_btn.click(lambda tid: _submit_decision("approve", None, tid), inputs=[thread_state], outputs=outputs)
-        edit_btn.click(lambda tid, notes: _submit_decision("edit", notes, tid), inputs=[thread_state, notes_tb], outputs=outputs)
-        reject_btn.click(lambda tid: _submit_decision("reject", None, tid), inputs=[thread_state], outputs=outputs)
-        new_campaign_btn.click(_reset, outputs=outputs)
+
+        io = [chatbot, thread_state, stage_state, msg_tb]
+        start_btn.click(_start_campaign, inputs=[channel_dd, topic_tb], outputs=io)
+        msg_tb.submit(_submit_message, inputs=[msg_tb, thread_state, stage_state, chatbot], outputs=io)
+        send_btn.click(_submit_message, inputs=[msg_tb, thread_state, stage_state, chatbot], outputs=io)
 
     return demo
 

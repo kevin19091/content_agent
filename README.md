@@ -24,6 +24,12 @@ considered final. See [PRD.md](PRD.md) for the full spec and decisions log.
 Runs pause/resume synchronously via LangGraph's `interrupt()` /
 `Command(resume=...)`, backed by an in-memory checkpointer.
 
+The UI is a single chat transcript, WhatsApp-style: every agent output
+renders on the right as bulleted markdown, every human message on the
+left. There are no approve/edit/reject buttons — you just type what you
+mean ("looks good", "make it punchier", "kill this one") and an LLM call
+classifies your intent before resuming the graph.
+
 ## Project layout
 
 ```
@@ -35,7 +41,7 @@ content_agent/
 ├── db.py, seed.py            SQLite: brand guidelines + brief config
 ├── nodes/                     ideation, creation, compliance, human_review
 ├── tools/                      brand_guidelines_tool, brief_creation_tool
-└── ui.py                        Gradio app (login, campaign form, review panel)
+└── ui.py                        Gradio chat app (login, campaign form, chat transcript)
 app.py                            entry point
 tests/                              pytest suite (offline, LLM calls mocked)
 ```
