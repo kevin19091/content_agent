@@ -167,7 +167,7 @@ def build_app() -> gr.Blocks:
             topic_tb = gr.Textbox(label="Campaign topic", placeholder="e.g. end of season clearance sale")
             start_btn = gr.Button("Start campaign", variant="primary")
 
-        chatbot = gr.Chatbot(type="messages", label="Review", height=500)
+        chatbot = gr.Chatbot(label="Review", height=500)
 
         with gr.Row():
             msg_tb = gr.Textbox(
