@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from content_agent.db import init_db
 from content_agent.graph import compile_app
+from content_agent.observability import track
 from content_agent.seed import seed
 
 load_dotenv()
@@ -32,10 +33,13 @@ _STAGE_DESCRIPTIONS = {
 }
 
 
+@track(name="classify_decision")
 def _classify_decision(stage: str, message: str) -> str:
     """Free-text -> approve/edit/reject. The raw message itself is reused
     verbatim as human_edit_notes when the result is 'edit' -- this call
-    only decides which of the three actions was meant."""
+    only decides which of the three actions was meant. Happens outside the
+    graph's own invoke(), so it needs its own @track to show up in Opik at
+    all -- track_langgraph on the graph doesn't see it."""
     prompt = (
         f"A human is reviewing {_STAGE_DESCRIPTIONS.get(stage, 'an agent output')} "
         f"in a content approval workflow and just sent this message:\n\n\"{message}\"\n\n"

@@ -6,6 +6,13 @@ import os
 # call itself is mocked below or per-test, so this key is never actually used.
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-a-real-key")
 
+# Force Opik tracing off regardless of what's in the developer's real .env --
+# content_agent.observability calls load_dotenv(), which won't override an
+# already-set var (even an empty one), so setting this first wins. Without
+# this, a real OPIK_API_KEY in .env would make the suite attempt real network
+# calls to Opik on every test run.
+os.environ.setdefault("OPIK_API_KEY", "")
+
 import pytest
 
 from content_agent.db import init_db

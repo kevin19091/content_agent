@@ -5,6 +5,7 @@ from content_agent.nodes.compliance import compliance_agent
 from content_agent.nodes.creation import content_creation_agent
 from content_agent.nodes.human_review import human_review
 from content_agent.nodes.ideation import ideation_agent
+from content_agent.observability import get_tracer, track_langgraph
 from content_agent.routing import route_after_review
 from content_agent.state import AgentState
 
@@ -50,4 +51,14 @@ def build_graph() -> StateGraph:
 
 
 def compile_app(checkpointer=None):
-    return build_graph().compile(checkpointer=checkpointer or MemorySaver())
+    """Wraps the compiled graph with Opik tracing when OPIK_API_KEY is
+    configured -- a true no-op otherwise (see content_agent.observability).
+    Captures the full graph run plus every LangChain LLM call within it
+    (both ideation calls, creation's, compliance's), grouped by LangGraph's
+    own thread_id since that's already passed via config["configurable"]
+    on every invoke()."""
+    app = build_graph().compile(checkpointer=checkpointer or MemorySaver())
+    tracer = get_tracer()
+    if tracer is not None:
+        app = track_langgraph(app, tracer)
+    return app

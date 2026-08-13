@@ -284,6 +284,13 @@ def human_review(state: AgentState):
     as `human_edit_notes` when the result is `edit`.
 - **Deployment:** Dockerized (single container running the Gradio app;
   SQLite file on a mounted volume, `OPENAI_API_KEY` passed through env)
+- **Observability:** Opik (Opik Cloud, comet.com), gated on `OPIK_API_KEY`
+  being set — a true no-op otherwise, so local dev/tests never require an
+  Opik account or make network calls. `track_langgraph` wraps the compiled
+  graph, capturing every agent LLM call automatically, grouped by
+  campaign via LangGraph's own `thread_id`. The UI's free-text
+  approve/edit/reject classifier runs outside the graph's `invoke()`, so
+  it's traced separately via `@track`.
 
 ---
 

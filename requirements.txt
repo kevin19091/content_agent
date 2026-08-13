@@ -2,5 +2,6 @@ langgraph>=0.6,<0.7
 langchain-openai>=0.2
 pydantic>=2
 gradio==6.24.0
+opik==2.2.27
 python-dotenv>=1
 pytest>=8

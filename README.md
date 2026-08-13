@@ -41,7 +41,8 @@ content_agent/
 ├── db.py, seed.py            SQLite: brand guidelines + brief config
 ├── nodes/                     ideation, creation, compliance, human_review
 ├── tools/                      brand_guidelines_tool, brief_creation_tool
-└── ui.py                        Gradio chat app (login, campaign form, chat transcript)
+├── observability.py             Opik tracing, gated on OPIK_API_KEY (no-op otherwise)
+└── ui.py                         Gradio chat app (login, campaign form, chat transcript)
 app.py                            entry point
 tests/                              pytest suite (offline, LLM calls mocked)
 ```
@@ -85,6 +86,16 @@ pytest
 
 All tests run offline — every LLM call is mocked in `tests/conftest.py`,
 so no `OPENAI_API_KEY` is needed to run the suite.
+
+## Observability (Opik)
+
+Optional, off by default. Set `OPIK_API_KEY` (and `OPIK_WORKSPACE`) in
+`.env` from a free [comet.com](https://www.comet.com) account to trace
+every LLM call — both `ideation_agent` calls, `content_creation_agent`'s,
+`compliance_agent`'s, and the UI's free-text approve/edit/reject
+classifier — grouped by campaign via LangGraph's `thread_id`. Leave
+`OPIK_API_KEY` unset and tracing is a true no-op: no network calls, same
+behavior the test suite relies on.
 
 ## Seeded demo data
 
