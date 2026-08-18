@@ -73,3 +73,43 @@ def test_whatsapp_and_push_get_different_channel_rules(monkeypatch):
     assert "1024 characters" not in push_prompt
     assert "65 characters" in push_prompt
     assert "65 characters" not in whatsapp_prompt
+
+
+def test_prompt_states_actual_character_counts_not_left_for_the_model_to_count(monkeypatch):
+    """The bug this guards against: the model doesn't reliably count
+    characters from raw text (verified live -- it flagged a 29-char title
+    as "36 characters, exceeds 65" on a draft nowhere near the limit).
+    Real counts must be computed in Python and stated in the prompt."""
+    captured = {}
+
+    class _Recording:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return ComplianceResult(passed=True, issues=[], severity="none")
+
+    monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _Recording())
+
+    draft = {"title": "A" * 12, "body": "B" * 40}
+    compliance_agent(_base_state(channel="push", draft_content=draft))
+
+    assert "exactly 12 characters" in captured["prompt"]
+    assert "exactly 40 characters" in captured["prompt"]
+    assert "within the limit" in captured["prompt"]
+    assert "OVER the limit" not in captured["prompt"]
+
+
+def test_prompt_flags_over_limit_status_for_genuinely_long_content(monkeypatch):
+    captured = {}
+
+    class _Recording:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return ComplianceResult(passed=True, issues=[], severity="none")
+
+    monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _Recording())
+
+    draft = {"title": "A" * 90, "body": "B" * 40}
+    compliance_agent(_base_state(channel="push", draft_content=draft))
+
+    assert "exactly 90 characters (OVER the limit)" in captured["prompt"]
+    assert "exactly 40 characters (within the limit)" in captured["prompt"]
