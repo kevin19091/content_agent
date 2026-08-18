@@ -15,12 +15,12 @@ def _start(message, history=None):
     always interrupts first regardless. One-shot intake message ("push
     channel, topic: ...") resolves in a single turn per conftest.py's fake
     extraction LLM, landing on the first ideation interrupt."""
-    history, thread_id, cleared, _dd = _send_message(message, None, history or [], FakeRequest())
+    history, thread_id, cleared, _dd, _fc = _send_message(message, None, history or [], FakeRequest())
     return history, thread_id, cleared
 
 
 def _send(message, thread_id, history):
-    history, thread_id, cleared, _dd = _send_message(message, thread_id, history, FakeRequest())
+    history, thread_id, cleared, _dd, _fc = _send_message(message, thread_id, history, FakeRequest())
     return history, thread_id, cleared
 
 
@@ -257,7 +257,7 @@ def test_campaign_status_updates_to_approved_on_completion():
 
 
 def test_campaign_dropdown_choices_refresh_after_sending(monkeypatch):
-    _, thread_id, _, dd_update = _send_message("push channel, topic: first one", None, [], FakeRequest())
+    _, thread_id, _, dd_update, _fc = _send_message("push channel, topic: first one", None, [], FakeRequest())
     choices = dd_update["choices"] if isinstance(dd_update, dict) else dd_update.choices
     values = [v for _label, v in choices]
     assert thread_id in values
@@ -265,7 +265,7 @@ def test_campaign_dropdown_choices_refresh_after_sending(monkeypatch):
 
 def test_resume_campaign_loads_stored_history_and_keeps_thread_id_if_in_progress():
     history, thread_id, _ = _start("push channel, topic: flash sale")
-    loaded_history, resumed_thread_id, cleared = _resume_campaign(thread_id)
+    loaded_history, resumed_thread_id, cleared, _fc = _resume_campaign(thread_id)
     assert loaded_history == history
     assert resumed_thread_id == thread_id
     assert cleared == ""
@@ -278,9 +278,45 @@ def test_resume_campaign_clears_thread_id_if_already_finished():
     history, thread_id, _ = _send("approve", thread_id, history)
     history, thread_id, _ = _send("approve", thread_id, history)
 
-    loaded_history, resumed_thread_id, _ = _resume_campaign(real_thread_id)
+    loaded_history, resumed_thread_id, _, _fc = _resume_campaign(real_thread_id)
     assert loaded_history == history
     assert resumed_thread_id is None  # nothing left to resume -- next message starts fresh
+
+
+# --- copy/export final content (PRD §11.8) ----------------------------------
+
+
+def test_final_content_box_hidden_while_in_progress():
+    _, _, _, _, fc_update = _send_message("push channel, topic: sale", None, [], FakeRequest())
+    assert fc_update["visible"] is False
+
+
+def test_final_content_box_shows_plain_text_on_approval():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    _, _, _, _dd, fc_update = _send_message("approve", thread_id, history, FakeRequest())
+    assert fc_update["visible"] is True
+    assert "Title" in fc_update["value"] or "Body" in fc_update["value"]
+    assert "**" not in fc_update["value"]  # plain text, not markdown
+
+
+def test_final_content_box_hidden_on_rejection():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    _, _, _, _, fc_update = _send_message("cancel this, reject it", thread_id, history, FakeRequest())
+    assert fc_update["visible"] is False
+
+
+def test_resume_campaign_restores_final_content_for_approved_campaign():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    real_thread_id = thread_id
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+
+    _, _, _, fc_update = _resume_campaign(real_thread_id)
+    assert fc_update["visible"] is True
+    assert "Body" in fc_update["value"] or "Title" in fc_update["value"]
 
 
 def test_resume_campaign_requires_a_selection():

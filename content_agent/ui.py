@@ -131,6 +131,29 @@ def _append_result(result: dict, thread_id: str, history: list):
     return history, None, ""
 
 
+def _plain_text(d: dict) -> str:
+    """Copy/paste-friendly rendering of final_content -- no markdown, so it
+    can go straight into a delivery system (PRD §11.8, §2)."""
+    lines = []
+    for k, v in d.items():
+        if v is None:
+            continue
+        label = k.replace("_", " ").title()
+        if isinstance(v, list):
+            if not v:
+                continue
+            lines.append(f"{label}: {'; '.join(str(x) for x in v)}")
+        else:
+            lines.append(f"{label}: {v}")
+    return "\n".join(lines)
+
+
+def _final_content_update(final_content: Optional[dict]):
+    if final_content is None:
+        return gr.update(value="", visible=False)
+    return gr.update(value=_plain_text(final_content), visible=True)
+
+
 def _persist_campaign(config: dict, history: list, result: dict) -> None:
     """PRD §11.7 -- called after every real turn (not on the bare intake
     greeting from _on_load, to avoid littering the list with abandoned
@@ -186,7 +209,13 @@ def _send_message(message: str, thread_id: Optional[str], history: list, request
             result = _recover_from_failure(e, config)
             history, thread_id, cleared = _append_result(result, thread_id, history)
             _persist_campaign(config, history, result)
-            return history, thread_id, cleared, _campaign_choices(request.username)
+            return (
+                history,
+                thread_id,
+                cleared,
+                _campaign_choices(request.username),
+                _final_content_update(result.get("final_content")),
+            )
     else:
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -197,7 +226,13 @@ def _send_message(message: str, thread_id: Optional[str], history: list, request
 
     history, thread_id, cleared = _append_result(result, thread_id, history)
     _persist_campaign(config, history, result)
-    return history, thread_id, cleared, _campaign_choices(request.username)
+    return (
+        history,
+        thread_id,
+        cleared,
+        _campaign_choices(request.username),
+        _final_content_update(result.get("final_content")),
+    )
 
 
 def _resume_campaign(thread_id: Optional[str]):
@@ -205,14 +240,22 @@ def _resume_campaign(thread_id: Optional[str]):
     campaigns table (not re-derived from graph state). Only carries
     thread_id forward if it's still in_progress -- an approved/rejected
     run has no pending interrupt left to resume, so the next message
-    should start a fresh campaign instead of trying to resume a dead one."""
+    should start a fresh campaign instead of trying to resume a dead one.
+
+    final_content isn't stored in the campaigns table (chat_history already
+    has it, rendered) -- for an approved campaign it's read back from the
+    graph's own checkpoint, which SqliteSaver keeps around after the run
+    ends, so the copy/export box (§11.8) still works after a resume."""
     if not thread_id:
         raise gr.Error("Pick a campaign first.")
     campaign = get_campaign(thread_id)
     if campaign is None:
         raise gr.Error("That campaign could not be found.")
     resumable_thread_id = thread_id if campaign["status"] == "in_progress" else None
-    return campaign["chat_history"], resumable_thread_id, ""
+    final_content = None
+    if campaign["status"] == "approved":
+        final_content = _app.get_state({"configurable": {"thread_id": thread_id}}).values.get("final_content")
+    return campaign["chat_history"], resumable_thread_id, "", _final_content_update(final_content)
 
 
 def _on_load(request: gr.Request):
@@ -226,7 +269,7 @@ def _on_load(request: gr.Request):
     except Exception as e:
         result = _recover_from_failure(e, config)
     history, thread_id, _ = _append_result(result, thread_id, [])
-    return client_id_msg, history, thread_id, _campaign_choices(request.username)
+    return client_id_msg, history, thread_id, _campaign_choices(request.username), _final_content_update(None)
 
 
 def build_app() -> gr.Blocks:
@@ -240,6 +283,13 @@ def build_app() -> gr.Blocks:
 
         chatbot = gr.Chatbot(label="Review", height=500)
 
+        final_content_tb = gr.Textbox(
+            label="Final content -- ready to copy",
+            buttons=["copy"],
+            interactive=False,
+            visible=False,
+        )
+
         with gr.Row():
             msg_tb = gr.Textbox(
                 placeholder='Message the agent... e.g. "a whatsapp sale campaign", "approve", "make it punchier"',
@@ -248,13 +298,15 @@ def build_app() -> gr.Blocks:
             )
             send_btn = gr.Button("Send", scale=1)
 
-        demo.load(_on_load, outputs=[client_id_md, chatbot, thread_state, campaign_dd])
+        demo.load(_on_load, outputs=[client_id_md, chatbot, thread_state, campaign_dd, final_content_tb])
 
-        io = [chatbot, thread_state, msg_tb, campaign_dd]
+        io = [chatbot, thread_state, msg_tb, campaign_dd, final_content_tb]
         msg_tb.submit(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
         send_btn.click(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
 
-        campaign_dd.change(_resume_campaign, inputs=[campaign_dd], outputs=[chatbot, thread_state, msg_tb])
+        campaign_dd.change(
+            _resume_campaign, inputs=[campaign_dd], outputs=[chatbot, thread_state, msg_tb, final_content_tb]
+        )
 
     return demo
 
