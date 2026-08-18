@@ -8,6 +8,7 @@ def _base_state(**overrides) -> AgentState:
         "brand_guidelines": None,
         "brief": None,
         "angle": None,
+        "angle_options": None,
         "draft_content": None,
         "compliance_result": None,
         "stage": None,
@@ -23,7 +24,8 @@ def test_ideation_agent_merges_tool_outputs_and_picks_angle():
     result = ideation_agent(_base_state())
 
     assert result["stage"] == "ideation"
-    assert result["angle"] == "stub angle"
+    assert result["angle_options"] == ["stub angle", "stub angle B", "stub angle C"]
+    assert result["angle"] == result["angle_options"][0]  # recommendation, first in the list
     # brief passed straight through from brief_creation_tool -- DB fields present
     assert result["brief"]["tone"] == "warm and conversational"
     assert result["brief"]["word_length"] == 60
@@ -38,14 +40,14 @@ def test_ideation_agent_includes_edit_notes_in_prompt(monkeypatch):
     class _RecordingAngleLLM:
         def invoke(self, prompt):
             captured["prompt"] = prompt
-            return _AngleSelection(angle="whatever")
+            return _AngleSelection(angles=["a", "b", "c"])
 
     monkeypatch.setattr("content_agent.nodes.ideation._structured_llm", _RecordingAngleLLM())
 
     ideation_agent(_base_state(human_edit_notes="make it more urgent"))
 
     assert "make it more urgent" in captured["prompt"]
-    assert "previous angle was rejected" in captured["prompt"]
+    assert "needed rework" in captured["prompt"]
 
 
 def test_ideation_agent_no_edit_notes_omits_rejection_language(monkeypatch):
@@ -54,10 +56,10 @@ def test_ideation_agent_no_edit_notes_omits_rejection_language(monkeypatch):
     class _RecordingAngleLLM:
         def invoke(self, prompt):
             captured["prompt"] = prompt
-            return _AngleSelection(angle="whatever")
+            return _AngleSelection(angles=["a", "b", "c"])
 
     monkeypatch.setattr("content_agent.nodes.ideation._structured_llm", _RecordingAngleLLM())
 
     ideation_agent(_base_state())
 
-    assert "previous angle was rejected" not in captured["prompt"]
+    assert "needed rework" not in captured["prompt"]

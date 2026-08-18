@@ -20,12 +20,26 @@ def test_bullets_empty_dict():
     assert _bullets({}) == "- (none)"
 
 
-def test_format_agent_message_ideation():
-    payload = {"stage": "ideation", "angle": "big savings", "brief": {"tone": "warm", "cta": "shop now"}}
+def test_format_agent_message_ideation_shows_three_options_with_recommendation_flagged():
+    payload = {
+        "stage": "ideation",
+        "angle": "big savings",
+        "angle_options": ["big savings", "limited time", "exclusive access"],
+        "brief": {"tone": "warm", "cta": "shop now"},
+    }
     msg = _format_agent_message(payload)
-    assert "Proposed angle & brief" in msg
-    assert "- **Angle:** big savings" in msg
+    assert "Proposed angles & brief" in msg
+    assert "1. big savings  *(recommended)*" in msg
+    assert "2. limited time" in msg
+    assert "2. limited time  *(recommended)*" not in msg
+    assert "3. exclusive access" in msg
     assert "- **Tone:** warm" in msg
+
+
+def test_format_agent_message_ideation_falls_back_without_angle_options():
+    payload = {"stage": "ideation", "angle": "big savings", "brief": {}}
+    msg = _format_agent_message(payload)
+    assert "**Angle:** big savings" in msg
 
 
 def test_format_agent_message_creation():

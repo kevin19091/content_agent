@@ -8,6 +8,7 @@ def _base_state(**overrides) -> AgentState:
         "brand_guidelines": None,
         "brief": None,
         "angle": None,
+        "angle_options": None,
         "draft_content": None,
         "compliance_result": None,
         "stage": "ideation",
@@ -23,8 +24,16 @@ def _base_state(**overrides) -> AgentState:
     return state
 
 
-def _fake_llm(action, target_stage=None):
-    return type("F", (), {"invoke": lambda self, p: _DecisionClassification(action=action, target_stage=target_stage)})()
+def _fake_llm(action, target_stage=None, selected_angle_index=None):
+    return type(
+        "F",
+        (),
+        {
+            "invoke": lambda self, p: _DecisionClassification(
+                action=action, target_stage=target_stage, selected_angle_index=selected_angle_index
+            )
+        },
+    )()
 
 
 def test_normal_classification_clears_error_fields(monkeypatch):
@@ -146,3 +155,70 @@ def test_classify_decisions_own_prior_failure_does_not_force_edit(monkeypatch):
     assert result["human_decision"] == "approve"
     assert result["node_error"] is None
     assert result["node_error_source"] is None
+
+
+_ANGLE_OPTIONS = ["recommended angle", "second angle", "third angle"]
+
+
+def test_approve_with_explicit_selection_overrides_angle(monkeypatch):
+    """PRD §11.5 -- picking a non-default option is just data on the same
+    approve action, not a new action type or a fresh ideation_agent call."""
+    monkeypatch.setattr(
+        "content_agent.nodes.classify_decision._structured_llm", _fake_llm("approve", selected_angle_index=1)
+    )
+    result = classify_decision(
+        _base_state(
+            stage="ideation",
+            angle="recommended angle",
+            angle_options=_ANGLE_OPTIONS,
+            human_message="let's go with the second one",
+        )
+    )
+    assert result["human_decision"] == "approve"
+    assert result["angle"] == "second angle"
+
+
+def test_approve_without_explicit_selection_does_not_touch_angle(monkeypatch):
+    """No selection expressed -- don't include 'angle' in the update at
+    all, so the recommendation ideation_agent already set (angle_options[0])
+    stays as-is rather than being redundantly reasserted."""
+    monkeypatch.setattr(
+        "content_agent.nodes.classify_decision._structured_llm", _fake_llm("approve", selected_angle_index=None)
+    )
+    result = classify_decision(
+        _base_state(stage="ideation", angle="recommended angle", angle_options=_ANGLE_OPTIONS, human_message="approve")
+    )
+    assert result["human_decision"] == "approve"
+    assert "angle" not in result
+
+
+def test_out_of_range_selected_angle_index_is_ignored(monkeypatch):
+    monkeypatch.setattr(
+        "content_agent.nodes.classify_decision._structured_llm", _fake_llm("approve", selected_angle_index=5)
+    )
+    result = classify_decision(
+        _base_state(stage="ideation", angle="recommended angle", angle_options=_ANGLE_OPTIONS, human_message="approve")
+    )
+    assert "angle" not in result
+
+
+def test_selected_angle_index_ignored_outside_ideation_stage(monkeypatch):
+    """selected_angle_index is only meaningful reviewing the angle options
+    themselves -- a stray value from the LLM at another stage must not
+    override angle."""
+    monkeypatch.setattr(
+        "content_agent.nodes.classify_decision._structured_llm", _fake_llm("approve", selected_angle_index=1)
+    )
+    result = classify_decision(_base_state(stage="creation", angle_options=None, human_message="approve"))
+    assert "angle" not in result
+
+
+def test_selected_angle_index_ignored_when_action_is_not_approve(monkeypatch):
+    monkeypatch.setattr(
+        "content_agent.nodes.classify_decision._structured_llm",
+        _fake_llm("edit", target_stage="ideation", selected_angle_index=1),
+    )
+    result = classify_decision(
+        _base_state(stage="ideation", angle_options=_ANGLE_OPTIONS, human_message="actually let's rework all of these")
+    )
+    assert "angle" not in result

@@ -15,6 +15,7 @@ def human_review(state: AgentState) -> dict:
         {
             "stage": state["stage"],
             "angle": state.get("angle"),
+            "angle_options": state.get("angle_options"),
             "brief": state.get("brief"),
             "draft_content": state.get("draft_content"),
             "compliance_result": state.get("compliance_result"),

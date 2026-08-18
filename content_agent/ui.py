@@ -59,8 +59,15 @@ def _format_agent_message(payload: dict) -> str:
     prefix = f"⚠️ **Something went wrong** (after 3 attempts)\n{node_error}\n\n---\n\n" if node_error else ""
 
     if stage == "ideation":
-        fields = {"angle": payload.get("angle"), **(payload.get("brief") or {})}
-        return prefix + "**Proposed angle & brief**\n" + _bullets(fields)
+        angle_options = payload.get("angle_options") or []
+        if angle_options:
+            angle_lines = [
+                f"{i + 1}. {a}" + ("  *(recommended)*" if i == 0 else "") for i, a in enumerate(angle_options)
+            ]
+            angles_block = "**Angle options:**\n" + "\n".join(angle_lines)
+        else:
+            angles_block = "**Angle:** " + str(payload.get("angle"))
+        return prefix + "**Proposed angles & brief**\n" + angles_block + "\n\n" + _bullets(payload.get("brief") or {})
 
     if stage == "creation":
         return prefix + "**Draft content**\n" + _bullets(payload.get("draft_content") or {})

@@ -45,9 +45,9 @@ class _FakeAngleLLM:
     def invoke(self, prompt):
         from content_agent.nodes.ideation import _AngleSelection
 
-        if "previous angle was rejected" in prompt:
-            return _AngleSelection(angle="stub angle (revised)")
-        return _AngleSelection(angle="stub angle")
+        if "needed rework" in prompt:
+            return _AngleSelection(angles=["stub angle (revised)", "stub angle B (revised)", "stub angle C (revised)"])
+        return _AngleSelection(angles=["stub angle", "stub angle B", "stub angle C"])
 
 
 class _FakeCreationLLM:
@@ -90,7 +90,13 @@ class _FakeDecisionLLM:
         if "reject" in lowered or "cancel" in lowered or "kill" in lowered:
             return _DecisionClassification(action="reject")
         if "approve" in lowered or "looks good" in lowered or "great" in lowered:
-            return _DecisionClassification(action="approve")
+            # PRD §11.5: explicit angle-option pick, keyword-based for tests.
+            selected_angle_index = None
+            if "second" in lowered:
+                selected_angle_index = 1
+            elif "third" in lowered:
+                selected_angle_index = 2
+            return _DecisionClassification(action="approve", selected_angle_index=selected_angle_index)
         # PRD §11.3: explicit target when the message names the angle;
         # otherwise None, letting classify_decision's own default apply --
         # covers both code paths (LLM-specified vs. fallback).

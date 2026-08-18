@@ -86,6 +86,28 @@ def test_human_led_routing_edit_at_compliance_reaches_ideation_directly():
     assert result["final_content"] is not None
 
 
+def test_ideation_offers_three_angles_and_a_non_default_pick_is_honored():
+    """PRD §11.5 -- three candidates are proposed; picking a non-default
+    one is data on the approve action, not a fresh ideation_agent call
+    (angle changes but angle_options doesn't -- same three options)."""
+    app = make_app()
+    config = {"configurable": {"thread_id": "angle-pick-test"}}
+
+    result = app.invoke(
+        {"request": {"client_id": "acme", "channel": "push", "campaign_topic": "sale"}},
+        config=config,
+    )
+    payload = result["__interrupt__"][0].value
+    assert payload["angle_options"] == ["stub angle", "stub angle B", "stub angle C"]
+    assert payload["angle"] == "stub angle"  # the recommendation, angle_options[0]
+
+    result = app.invoke(Command(resume="let's go with the second one, approve"), config=config)
+    state = app.get_state(config).values
+    assert state["angle"] == "stub angle B"  # overridden to the pick, not the recommendation
+    assert state["angle_options"] == ["stub angle", "stub angle B", "stub angle C"]  # unchanged
+    assert result["__interrupt__"][0].value["stage"] == "creation"  # moved forward normally
+
+
 @pytest.mark.parametrize(
     "decisions,expected_stages",
     [

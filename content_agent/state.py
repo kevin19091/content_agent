@@ -14,6 +14,7 @@ class AgentState(TypedDict):
     brand_guidelines: Optional[dict]
     brief: Optional[dict]
     angle: Optional[str]
+    angle_options: Optional[list[str]]
     draft_content: Optional[dict]
     compliance_result: Optional[dict]
     stage: Optional[Literal["ideation", "creation", "compliance"]]
