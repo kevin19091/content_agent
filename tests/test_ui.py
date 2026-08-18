@@ -53,6 +53,20 @@ def test_format_agent_message_compliance_no_issues():
     assert "- **Issues:** none" in msg
 
 
+def test_format_agent_message_node_error_gets_distinct_prefix():
+    payload = {"stage": "creation", "draft_content": None, "node_error": "rate limited"}
+    msg = _format_agent_message(payload)
+    assert "Something went wrong" in msg
+    assert "rate limited" in msg
+    assert msg.index("Something went wrong") < msg.index("Draft content")
+
+
+def test_format_agent_message_no_node_error_has_no_warning_prefix():
+    payload = {"stage": "creation", "draft_content": {"body": "x"}}
+    msg = _format_agent_message(payload)
+    assert "Something went wrong" not in msg
+
+
 def test_start_campaign_produces_agent_message_on_right():
     history, thread_id, stage, cleared = _start_campaign("whatsapp", "sale", FakeRequest())
     assert history[0]["role"] == "assistant"  # human's kickoff, left
@@ -110,3 +124,52 @@ def test_free_text_reject_ends_run_with_no_final_content():
     history, thread_id, stage, _ = _submit_message("cancel this, reject it", thread_id, stage, history)
     assert stage is None
     assert "Rejected" in history[-1]["content"]
+
+
+class _AlwaysFailsLLM:
+    """RuntimeError is explicitly non-retryable per langgraph's
+    default_retry_on, so this fails on the first attempt -- fast test, no
+    real RetryPolicy backoff wait."""
+
+    def invoke(self, prompt):
+        raise RuntimeError("simulated content_creation_agent failure")
+
+
+class _WorkingCreationLLM:
+    def invoke(self, prompt):
+        from content_agent.schemas import WhatsAppContent
+
+        return WhatsAppContent(template_name="t", body="recovered draft", cta_button_text="Shop now")
+
+
+def test_recovers_from_a_node_failure_and_can_continue(monkeypatch):
+    """End-to-end through the real graph: content_creation_agent fails on
+    its first invocation, RetryPolicy exhausts, ui.py's
+    _recover_from_failure lands back on human_review's interrupt with
+    node_error visible and distinctly styled. classify_decision's safety
+    guard then forces a retry of the failed step regardless of what the
+    human says (draft_content was never actually produced) -- swapping
+    back to a working LLM proves the retry actually succeeds and the run
+    continues normally."""
+    history, thread_id, stage, _ = _start_campaign("whatsapp", "sale", FakeRequest())
+    assert stage == "ideation"
+
+    # break content_creation_agent BEFORE it's ever invoked -- approving
+    # here is what first routes into it.
+    monkeypatch.setattr(
+        "content_agent.nodes.creation._structured_llms",
+        {"whatsapp": _AlwaysFailsLLM(), "push": _AlwaysFailsLLM()},
+    )
+    history, thread_id, stage, _ = _submit_message("approve", thread_id, stage, history)
+    assert stage == "creation"  # re-interrupted at the stage it would have produced
+    assert "Something went wrong" in history[-1]["content"]
+    assert "simulated content_creation_agent failure" in history[-1]["content"]
+
+    monkeypatch.setattr(
+        "content_agent.nodes.creation._structured_llms",
+        {"whatsapp": _WorkingCreationLLM(), "push": _WorkingCreationLLM()},
+    )
+    history, thread_id, stage, _ = _submit_message("okay try again", thread_id, stage, history)
+    assert stage == "creation"
+    assert "Something went wrong" not in history[-1]["content"]
+    assert "recovered draft" in history[-1]["content"]

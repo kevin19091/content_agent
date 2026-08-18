@@ -80,7 +80,7 @@ class _FakeDecisionLLM:
     would always hit "reject" first regardless of what was actually said."""
 
     def invoke(self, prompt):
-        from content_agent.ui import _DecisionClassification
+        from content_agent.nodes.classify_decision import _DecisionClassification
 
         try:
             message = prompt.split('message:\n\n"', 1)[1].rsplit('"\n\nClassify', 1)[0]
@@ -106,4 +106,4 @@ def _fake_llms(monkeypatch):
         {"whatsapp": _FakeCreationLLM("whatsapp"), "push": _FakeCreationLLM("push")},
     )
     monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _FakeComplianceLLM())
-    monkeypatch.setattr("content_agent.ui._structured_decision_llm", _FakeDecisionLLM())
+    monkeypatch.setattr("content_agent.nodes.classify_decision._structured_llm", _FakeDecisionLLM())

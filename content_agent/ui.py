@@ -1,16 +1,13 @@
 import os
 import uuid
-from typing import Literal, Optional
+from typing import Optional
 
 import gradio as gr
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langgraph.types import Command
-from pydantic import BaseModel
 
 from content_agent.db import init_db
 from content_agent.graph import compile_app
-from content_agent.observability import track
 from content_agent.seed import seed
 
 load_dotenv()
@@ -18,37 +15,26 @@ load_dotenv()
 _SHARED_PASSWORD = os.environ.get("CONTENT_AGENT_SHARED_PASSWORD", "changeme")
 _app = compile_app()
 
-
-class _DecisionClassification(BaseModel):
-    action: Literal["approve", "edit", "reject"]
-
-
-_decision_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-_structured_decision_llm = _decision_llm.with_structured_output(_DecisionClassification)
-
-_STAGE_DESCRIPTIONS = {
-    "ideation": "the proposed content angle and brief",
-    "creation": "a draft of the actual copy",
-    "compliance": "a brand/channel compliance check result",
+_STAGE_BY_NODE = {
+    "ideation_agent": "ideation",
+    "content_creation_agent": "creation",
+    "compliance_agent": "compliance",
 }
 
 
-@track(name="classify_decision")
-def _classify_decision(stage: str, message: str) -> str:
-    """Free-text -> approve/edit/reject. The raw message itself is reused
-    verbatim as human_edit_notes when the result is 'edit' -- this call
-    only decides which of the three actions was meant. Happens outside the
-    graph's own invoke(), so it needs its own @track to show up in Opik at
-    all -- track_langgraph on the graph doesn't see it."""
-    prompt = (
-        f"A human is reviewing {_STAGE_DESCRIPTIONS.get(stage, 'an agent output')} "
-        f"in a content approval workflow and just sent this message:\n\n\"{message}\"\n\n"
-        "Classify their intent as exactly one of:\n"
-        "- approve: satisfied, move on as-is\n"
-        "- edit: wants changes; their message is the feedback to act on\n"
-        "- reject: wants to kill this campaign entirely, not just request changes"
-    )
-    return _structured_decision_llm.invoke(prompt).action
+def _recover_from_failure(exc: Exception, config: dict) -> dict:
+    """PRD §11.4 -- called when a node's RetryPolicy exhausts every
+    attempt and the exception escapes invoke(). Finds which node was
+    executing (no hardcoding), injects the failure as if that node had
+    produced it, and continues -- lands back on human_review's interrupt
+    through the graph's own edges, same rendering path as any normal
+    turn (see _format_agent_message's node_error handling)."""
+    failed_node = _app.get_state(config).next[0]
+    values = {"node_error": str(exc), "node_error_source": failed_node}
+    if failed_node in _STAGE_BY_NODE:
+        values["stage"] = _STAGE_BY_NODE[failed_node]
+    _app.update_state(config, values, as_node=failed_node)
+    return _app.invoke(None, config=config)
 
 
 def _bullets(d: dict) -> str:
@@ -69,12 +55,15 @@ def _bullets(d: dict) -> str:
 def _format_agent_message(payload: dict) -> str:
     stage = payload["stage"]
 
+    node_error = payload.get("node_error")
+    prefix = f"⚠️ **Something went wrong** (after 3 attempts)\n{node_error}\n\n---\n\n" if node_error else ""
+
     if stage == "ideation":
         fields = {"angle": payload.get("angle"), **(payload.get("brief") or {})}
-        return "**Proposed angle & brief**\n" + _bullets(fields)
+        return prefix + "**Proposed angle & brief**\n" + _bullets(fields)
 
     if stage == "creation":
-        return "**Draft content**\n" + _bullets(payload.get("draft_content") or {})
+        return prefix + "**Draft content**\n" + _bullets(payload.get("draft_content") or {})
 
     if stage == "compliance":
         cr = payload.get("compliance_result") or {}
@@ -85,9 +74,9 @@ def _format_agent_message(payload: dict) -> str:
             lines.extend(f"  - {issue}" for issue in issues)
         else:
             lines.append("- **Issues:** none")
-        return "**Compliance review**\n" + "\n".join(lines)
+        return prefix + "**Compliance review**\n" + "\n".join(lines)
 
-    return "**Update**\n" + _bullets(payload)
+    return prefix + "**Update**\n" + _bullets(payload)
 
 
 def _authenticate(username: str, password: str) -> bool:
@@ -131,6 +120,8 @@ def _start_campaign(channel: str, campaign_topic: str, request: gr.Request):
         )
     except ValueError as e:
         raise gr.Error(str(e))
+    except Exception as e:
+        result = _recover_from_failure(e, config)
 
     return _append_result(result, thread_id, history)
 
@@ -143,13 +134,11 @@ def _submit_message(message: str, thread_id: Optional[str], stage: Optional[str]
 
     history = history + [{"role": "assistant", "content": message}]
 
-    action = _classify_decision(stage, message)
-    resume = {"action": action}
-    if action == "edit":
-        resume["notes"] = message
-
     config = {"configurable": {"thread_id": thread_id}}
-    result = _app.invoke(Command(resume=resume), config=config)
+    try:
+        result = _app.invoke(Command(resume=message), config=config)
+    except Exception as e:
+        result = _recover_from_failure(e, config)
 
     return _append_result(result, thread_id, history)
 
