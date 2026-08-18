@@ -37,13 +37,21 @@ _DEFAULT_EDIT_TARGET = {
 }
 
 _TARGET_STAGE_INSTRUCTIONS = (
+    # Deliberately does NOT name the actual default value (previously ended
+    # with "...default to '{default}'"). Verified live against the real
+    # model: naming the default anchored it there even for unambiguous
+    # messages -- "change the angle" at stage=creation consistently (5/5)
+    # came back target_stage="creation" with that phrasing, and consistently
+    # (5/5) came back the correct "ideation" once the instruction just said
+    # to leave it unset. Defaulting stays a pure code-level fallback
+    # (_DEFAULT_EDIT_TARGET below), never restated in the prompt.
     "\n\nIf the action is 'edit', also decide which stage the change belongs "
     "at:\n"
     "- 'ideation': they want a different angle/hook, or a brief-level change "
     '(e.g. "go back and change the angle", "let\'s rethink this entirely")\n'
     "- 'creation': they want the copy itself revised without changing the "
     'underlying angle (e.g. "make it punchier", "shorten the body")\n'
-    "If it's not clear which they mean, default to '{default}'."
+    "If it genuinely is not clear which they mean, leave this field unset."
 )
 
 _ANGLE_SELECTION_INSTRUCTIONS = (
@@ -92,7 +100,7 @@ def classify_decision(state: AgentState) -> dict:
         "- reject: wants to kill this campaign entirely, not just request changes"
     )
     if stage != "ideation":
-        prompt += _TARGET_STAGE_INSTRUCTIONS.format(default=_DEFAULT_EDIT_TARGET[stage])
+        prompt += _TARGET_STAGE_INSTRUCTIONS
     if stage == "ideation" and angle_options:
         options_text = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(angle_options))
         prompt += _ANGLE_SELECTION_INSTRUCTIONS.format(options=options_text)
