@@ -366,3 +366,32 @@ def test_resume_campaign_reply_hint_reflects_current_stage():
     history, thread_id, _ = _start("push channel, topic: sale")
     _, _, _, _fc, hint = _resume_campaign(thread_id)
     assert "angle" in hint.lower() or "approve" in hint.lower()
+
+
+# --- regression: campaign dropdown event wiring -----------------------------
+
+
+def test_campaign_dropdown_uses_select_not_change():
+    """Found live in a real browser (not by the function-level tests above,
+    which call _resume_campaign directly and never exercise Gradio's actual
+    event-wiring layer). .change() fires on ANY value update to a component,
+    not just user interaction -- including the programmatic
+    gr.update(value=None, ...) that _campaign_choices() returns on every
+    single _on_load/_send_message call to refresh the choice list. That was
+    silently invoking _resume_campaign(None) on every page load and every
+    chat turn, which explicitly raises gr.Error("Pick a campaign first."),
+    surfacing as unprompted "Error" badges across the whole page. .select()
+    only fires on a genuine user click in the dropdown -- confirmed by
+    reverting to .change() and reproducing the exact error live, then
+    restoring .select() and confirming a full approve chain plus a real
+    dropdown selection both complete with zero errors."""
+    from content_agent.ui import build_app
+
+    demo = build_app()
+    dropdown_id = next(
+        cid for cid, block in demo.blocks.items() if getattr(block, "label", None) == "Past campaigns"
+    )
+    events = {
+        event for dep in demo.config["dependencies"] for cid, event in (dep.get("targets") or []) if cid == dropdown_id
+    }
+    assert events == {"select"}

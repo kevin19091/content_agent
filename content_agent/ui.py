@@ -345,7 +345,13 @@ def build_app() -> gr.Blocks:
         msg_tb.submit(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
         send_btn.click(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
 
-        campaign_dd.change(
+        # .select(), not .change() -- .change() fires on ANY value update,
+        # including the programmatic gr.update(value=None, ...) that
+        # _campaign_choices() returns on every _on_load/_send_message call
+        # (to refresh the choice list), which would call _resume_campaign(None)
+        # on every turn and raise gr.Error("Pick a campaign first."). .select()
+        # only fires on a genuine user click in the dropdown.
+        campaign_dd.select(
             _resume_campaign,
             inputs=[campaign_dd],
             outputs=[chatbot, thread_state, msg_tb, final_content_tb, reply_hint_md],
