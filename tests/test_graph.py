@@ -73,6 +73,19 @@ def test_edit_at_compliance_loops_back_and_recompliance_checks():
     assert result["final_content"] is not None
 
 
+def test_human_led_routing_edit_at_compliance_reaches_ideation_directly():
+    """PRD §11.3 -- the gap human-led routing closes: v1 always forced
+    edit-at-compliance through content_creation_agent, even when the
+    human wanted the angle redone. "angle" is the fake decision LLM's
+    (conftest.py) keyword for target_stage=ideation."""
+    app = make_app()
+    result, stages = run(
+        app, ["approve", "approve", "go back and change the angle", "approve", "approve", "approve"]
+    )
+    assert stages == ["ideation", "creation", "compliance", "ideation", "creation", "compliance"]
+    assert result["final_content"] is not None
+
+
 @pytest.mark.parametrize(
     "decisions,expected_stages",
     [

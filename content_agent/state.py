@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     human_message: Optional[str]
     human_decision: Optional[Literal["approve", "edit", "reject"]]
     human_edit_notes: Optional[str]
+    target_stage: Optional[Literal["ideation", "creation"]]
     final_content: Optional[dict]
     node_error: Optional[str]
     node_error_source: Optional[str]

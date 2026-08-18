@@ -1,11 +1,15 @@
 from content_agent.state import AgentState
 
-# PRD §6.4/§11.2 routing table (after classify_decision):
+# PRD §6.4/§11.2/§11.3 routing table (after classify_decision):
 #   node_error set (classify_decision's own retries exhausted) -> human_review, re-prompt
-#   stage       | approve ->              | edit ->                 | reject ->
-#   ideation    | content_creation_agent  | ideation_agent          | rejected
-#   creation    | compliance_agent        | content_creation_agent  | rejected
-#   compliance  | approved                | content_creation_agent  | rejected
+#   stage       | approve ->              | edit ->                        | reject ->
+#   ideation    | content_creation_agent  | ideation_agent (only option)   | rejected
+#   creation    | compliance_agent        | target_stage (ideation/creation) | rejected
+#   compliance  | approved                | target_stage (ideation/creation) | rejected
+#
+# edit's target is human-led, not a fixed one-step-back -- classify_decision
+# sets target_stage from what the human actually asked for (defaulting to
+# the old one-step-back behavior when they didn't specify).
 
 
 def route_after_review(state: AgentState) -> str:
@@ -24,7 +28,8 @@ def route_after_review(state: AgentState) -> str:
         return "rejected"
 
     if decision == "edit":
-        return "ideation_agent" if stage == "ideation" else "content_creation_agent"
+        target_stage = state.get("target_stage")
+        return "ideation_agent" if target_stage == "ideation" else "content_creation_agent"
 
     if decision == "approve":
         if stage == "ideation":

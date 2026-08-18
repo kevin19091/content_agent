@@ -91,7 +91,11 @@ class _FakeDecisionLLM:
             return _DecisionClassification(action="reject")
         if "approve" in lowered or "looks good" in lowered or "great" in lowered:
             return _DecisionClassification(action="approve")
-        return _DecisionClassification(action="edit")
+        # PRD §11.3: explicit target when the message names the angle;
+        # otherwise None, letting classify_decision's own default apply --
+        # covers both code paths (LLM-specified vs. fallback).
+        target_stage = "ideation" if ("angle" in lowered or "rethink" in lowered) else None
+        return _DecisionClassification(action="edit", target_stage=target_stage)
 
 
 @pytest.fixture(autouse=True)
