@@ -1,7 +1,8 @@
 import gradio as gr
 import pytest
 
-from content_agent.ui import _bullets, _format_agent_message, _send_message
+from content_agent.campaigns import get_campaign
+from content_agent.ui import _bullets, _format_agent_message, _resume_campaign, _send_message
 
 
 class FakeRequest:
@@ -14,7 +15,13 @@ def _start(message, history=None):
     always interrupts first regardless. One-shot intake message ("push
     channel, topic: ...") resolves in a single turn per conftest.py's fake
     extraction LLM, landing on the first ideation interrupt."""
-    return _send_message(message, None, history or [], FakeRequest())
+    history, thread_id, cleared, _dd = _send_message(message, None, history or [], FakeRequest())
+    return history, thread_id, cleared
+
+
+def _send(message, thread_id, history):
+    history, thread_id, cleared, _dd = _send_message(message, thread_id, history, FakeRequest())
+    return history, thread_id, cleared
 
 
 def test_bullets_formats_dict_skips_none_and_joins_lists():
@@ -121,38 +128,38 @@ def test_intake_accumulates_across_turns_before_reaching_ideation():
     history, thread_id, _ = _start("topic: end of season sale")
     assert "channel" in history[-1]["content"].lower()
 
-    history, thread_id, _ = _send_message("whatsapp", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("whatsapp", thread_id, history)
     assert "Proposed angles" in history[-1]["content"]
 
 
 def test_free_text_approve_chain_reaches_final_content():
     history, thread_id, _ = _start("push channel, topic: flash sale")
 
-    history, thread_id, _ = _send_message("looks great, approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("looks great, approve", thread_id, history)
     assert history[-2]["role"] == "assistant"  # human message, left
     assert history[-1]["role"] == "user"  # next agent output, right
     assert "Draft content" in history[-1]["content"]
 
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("approve", thread_id, history)
     assert "Compliance review" in history[-1]["content"]
 
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("approve", thread_id, history)
     assert thread_id is None  # run finished -- next message starts fresh
     assert "Approved" in history[-1]["content"]
 
 
 def test_free_text_edit_loops_back():
     history, thread_id, _ = _start("whatsapp channel, topic: sale")
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("approve", thread_id, history)
     assert "Draft content" in history[-1]["content"]
 
-    history, thread_id, _ = _send_message("please make it shorter and punchier", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("please make it shorter and punchier", thread_id, history)
     assert "revised" in history[-1]["content"]  # looped back, re-interrupted at same stage
 
 
 def test_free_text_reject_ends_run_with_no_final_content():
     history, thread_id, _ = _start("push channel, topic: sale")
-    history, thread_id, _ = _send_message("cancel this, reject it", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("cancel this, reject it", thread_id, history)
     assert thread_id is None
     assert "Rejected" in history[-1]["content"]
 
@@ -165,13 +172,13 @@ def test_intake_cancel_ends_run_with_no_final_content():
 
 def test_a_finished_run_lets_the_next_message_start_a_new_campaign():
     history, thread_id, _ = _start("push channel, topic: sale")
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
     assert thread_id is None
 
     # next message starts a brand new campaign from scratch
-    history, thread_id, _ = _send_message("whatsapp channel, topic: another sale", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("whatsapp channel, topic: another sale", thread_id, history)
     assert thread_id is not None
     assert "Proposed angles" in history[-1]["content"]
 
@@ -209,7 +216,7 @@ def test_recovers_from_a_node_failure_and_can_continue(monkeypatch):
         "content_agent.nodes.creation._structured_llms",
         {"whatsapp": _AlwaysFailsLLM(), "push": _AlwaysFailsLLM()},
     )
-    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("approve", thread_id, history)
     assert "Something went wrong" in history[-1]["content"]
     assert "simulated content_creation_agent failure" in history[-1]["content"]
 
@@ -217,6 +224,70 @@ def test_recovers_from_a_node_failure_and_can_continue(monkeypatch):
         "content_agent.nodes.creation._structured_llms",
         {"whatsapp": _WorkingCreationLLM(), "push": _WorkingCreationLLM()},
     )
-    history, thread_id, _ = _send_message("okay try again", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send("okay try again", thread_id, history)
     assert "Something went wrong" not in history[-1]["content"]
     assert "recovered draft" in history[-1]["content"]
+
+
+# --- conversation memory (PRD §11.7) --------------------------------------
+
+
+def test_campaign_is_persisted_after_first_message():
+    history, thread_id, _ = _start("push channel, topic: flash sale")
+    campaign = get_campaign(thread_id)
+    assert campaign is not None
+    assert campaign["client_id"] == "acme"
+    assert campaign["channel"] == "push"
+    assert campaign["campaign_topic"] == "flash sale"
+    assert campaign["status"] == "in_progress"
+    assert campaign["chat_history"] == history
+
+
+def test_campaign_status_updates_to_approved_on_completion():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    real_thread_id = thread_id  # captured before the final turn resets it to None
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    assert thread_id is None
+
+    campaign = get_campaign(real_thread_id)
+    assert campaign["status"] == "approved"
+    assert campaign["chat_history"] == history
+
+
+def test_campaign_dropdown_choices_refresh_after_sending(monkeypatch):
+    _, thread_id, _, dd_update = _send_message("push channel, topic: first one", None, [], FakeRequest())
+    choices = dd_update["choices"] if isinstance(dd_update, dict) else dd_update.choices
+    values = [v for _label, v in choices]
+    assert thread_id in values
+
+
+def test_resume_campaign_loads_stored_history_and_keeps_thread_id_if_in_progress():
+    history, thread_id, _ = _start("push channel, topic: flash sale")
+    loaded_history, resumed_thread_id, cleared = _resume_campaign(thread_id)
+    assert loaded_history == history
+    assert resumed_thread_id == thread_id
+    assert cleared == ""
+
+
+def test_resume_campaign_clears_thread_id_if_already_finished():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    real_thread_id = thread_id  # captured before the final turn resets it to None
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+
+    loaded_history, resumed_thread_id, _ = _resume_campaign(real_thread_id)
+    assert loaded_history == history
+    assert resumed_thread_id is None  # nothing left to resume -- next message starts fresh
+
+
+def test_resume_campaign_requires_a_selection():
+    with pytest.raises(gr.Error):
+        _resume_campaign(None)
+
+
+def test_resume_campaign_errors_on_unknown_thread_id():
+    with pytest.raises(gr.Error):
+        _resume_campaign("not-a-real-thread-id")

@@ -31,6 +31,23 @@ def _isolated_db(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_app(monkeypatch):
+    """content_agent.ui's module-level _app is built once at import time,
+    before _isolated_db's per-test DB even exists -- with SqliteSaver now
+    the default checkpointer (PRD §11.7), that would otherwise bind every
+    test run to the real dev database file instead of a test-isolated one.
+    Give each test its own MemorySaver-backed app instead, matching how
+    test_graph.py's own make_app() already does this explicitly."""
+    import sys
+
+    if "content_agent.ui" in sys.modules:
+        import content_agent.ui as ui_module
+        from langgraph.checkpoint.memory import MemorySaver
+
+        monkeypatch.setattr(ui_module, "_app", ui_module.compile_app(checkpointer=MemorySaver()))
+
+
 class _FakeBriefLLM:
     def invoke(self, prompt):
         return _DerivedBriefFields(

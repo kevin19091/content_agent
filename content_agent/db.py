@@ -25,6 +25,17 @@ CREATE TABLE IF NOT EXISTS client_channel_brief (
     word_length INTEGER NOT NULL,
     PRIMARY KEY (client_id, channel)
 );
+
+CREATE TABLE IF NOT EXISTS campaigns (
+    thread_id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    channel TEXT,
+    campaign_topic TEXT,
+    status TEXT NOT NULL,
+    chat_history TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -32,6 +43,15 @@ def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_checkpointer_connection() -> sqlite3.Connection:
+    """PRD §11.7 -- same file as everything else in content_agent.db (one
+    SQLite file to volume-mount in Docker, not two). check_same_thread=False
+    because this single long-lived connection is shared across whatever
+    thread Gradio's queue happens to service a given request on -- SqliteSaver
+    itself serializes access, so this is safe."""
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
 def init_db() -> None:

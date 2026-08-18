@@ -6,6 +6,7 @@ import gradio as gr
 from dotenv import load_dotenv
 from langgraph.types import Command
 
+from content_agent.campaigns import get_campaign, list_campaigns, save_campaign
 from content_agent.db import init_db
 from content_agent.graph import compile_app
 from content_agent.seed import seed
@@ -130,6 +131,41 @@ def _append_result(result: dict, thread_id: str, history: list):
     return history, None, ""
 
 
+def _persist_campaign(config: dict, history: list, result: dict) -> None:
+    """PRD §11.7 -- called after every real turn (not on the bare intake
+    greeting from _on_load, to avoid littering the list with abandoned
+    "empty" campaigns from a page load that never led to a message)."""
+    state = _app.get_state(config).values
+    client_id = state.get("client_id")
+    if not client_id:
+        return
+
+    request_data = state.get("request") or {}
+    if "__interrupt__" in result:
+        status = "in_progress"
+    elif result.get("final_content") is not None:
+        status = "approved"
+    else:
+        status = "rejected"
+
+    save_campaign(
+        thread_id=config["configurable"]["thread_id"],
+        client_id=client_id,
+        channel=request_data.get("channel"),
+        campaign_topic=request_data.get("campaign_topic"),
+        status=status,
+        chat_history=history,
+    )
+
+
+def _campaign_choices(client_id: str):
+    choices = [
+        (f"{c['channel'] or '?'} · {c['campaign_topic'] or '(no topic yet)'} · {c['status']}", c["thread_id"])
+        for c in list_campaigns(client_id)
+    ]
+    return gr.update(choices=choices, value=None)
+
+
 def _send_message(message: str, thread_id: Optional[str], history: list, request: gr.Request):
     """PRD §11.1 -- one text box for the whole session. No active thread
     -> this message starts a brand new campaign (client_id from login,
@@ -148,7 +184,9 @@ def _send_message(message: str, thread_id: Optional[str], history: list, request
             _app.invoke({"client_id": request.username}, config=config)  # reaches collect_request's interrupt
         except Exception as e:
             result = _recover_from_failure(e, config)
-            return _append_result(result, thread_id, history)
+            history, thread_id, cleared = _append_result(result, thread_id, history)
+            _persist_campaign(config, history, result)
+            return history, thread_id, cleared, _campaign_choices(request.username)
     else:
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -157,7 +195,24 @@ def _send_message(message: str, thread_id: Optional[str], history: list, request
     except Exception as e:
         result = _recover_from_failure(e, config)
 
-    return _append_result(result, thread_id, history)
+    history, thread_id, cleared = _append_result(result, thread_id, history)
+    _persist_campaign(config, history, result)
+    return history, thread_id, cleared, _campaign_choices(request.username)
+
+
+def _resume_campaign(thread_id: Optional[str]):
+    """PRD §11.7 -- loads a past campaign's exact transcript from the
+    campaigns table (not re-derived from graph state). Only carries
+    thread_id forward if it's still in_progress -- an approved/rejected
+    run has no pending interrupt left to resume, so the next message
+    should start a fresh campaign instead of trying to resume a dead one."""
+    if not thread_id:
+        raise gr.Error("Pick a campaign first.")
+    campaign = get_campaign(thread_id)
+    if campaign is None:
+        raise gr.Error("That campaign could not be found.")
+    resumable_thread_id = thread_id if campaign["status"] == "in_progress" else None
+    return campaign["chat_history"], resumable_thread_id, ""
 
 
 def _on_load(request: gr.Request):
@@ -171,7 +226,7 @@ def _on_load(request: gr.Request):
     except Exception as e:
         result = _recover_from_failure(e, config)
     history, thread_id, _ = _append_result(result, thread_id, [])
-    return client_id_msg, history, thread_id
+    return client_id_msg, history, thread_id, _campaign_choices(request.username)
 
 
 def build_app() -> gr.Blocks:
@@ -180,6 +235,8 @@ def build_app() -> gr.Blocks:
         client_id_md = gr.Markdown()
 
         thread_state = gr.State(None)
+
+        campaign_dd = gr.Dropdown(label="Past campaigns", choices=[], value=None)
 
         chatbot = gr.Chatbot(label="Review", height=500)
 
@@ -191,11 +248,13 @@ def build_app() -> gr.Blocks:
             )
             send_btn = gr.Button("Send", scale=1)
 
-        demo.load(_on_load, outputs=[client_id_md, chatbot, thread_state])
+        demo.load(_on_load, outputs=[client_id_md, chatbot, thread_state, campaign_dd])
 
-        io = [chatbot, thread_state, msg_tb]
+        io = [chatbot, thread_state, msg_tb, campaign_dd]
         msg_tb.submit(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
         send_btn.click(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
+
+        campaign_dd.change(_resume_campaign, inputs=[campaign_dd], outputs=[chatbot, thread_state, msg_tb])
 
     return demo
 

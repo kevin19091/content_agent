@@ -1,4 +1,6 @@
 langgraph>=0.6,<0.7
+langgraph-checkpoint==3.0.1
+langgraph-checkpoint-sqlite==3.0.3
 langchain-openai>=0.2
 pydantic>=2
 gradio==6.24.0

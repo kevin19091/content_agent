@@ -1,8 +1,9 @@
 import openai
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import RetryPolicy, default_retry_on
 
+from content_agent.db import get_checkpointer_connection
 from content_agent.nodes.classify_decision import classify_decision
 from content_agent.nodes.collect_request import collect_request
 from content_agent.nodes.compliance import compliance_agent
@@ -98,8 +99,15 @@ def compile_app(checkpointer=None):
     Captures the full graph run plus every LangChain LLM call within it,
     including classify_decision now that it's a real node, grouped by
     LangGraph's own thread_id since that's already passed via
-    config["configurable"] on every invoke()."""
-    app = build_graph().compile(checkpointer=checkpointer or MemorySaver())
+    config["configurable"] on every invoke().
+
+    PRD §11.7 -- defaults to SqliteSaver (same file as the rest of
+    content_agent.db) so campaigns survive a restart; tests pass their own
+    MemorySaver explicitly for speed and isolation."""
+    if checkpointer is None:
+        checkpointer = SqliteSaver(get_checkpointer_connection())
+        checkpointer.setup()  # creates the checkpoints/writes tables if not already present
+    app = build_graph().compile(checkpointer=checkpointer)
     tracer = get_tracer()
     if tracer is not None:
         app = track_langgraph(app, tracer)
