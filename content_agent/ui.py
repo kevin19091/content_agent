@@ -22,6 +22,14 @@ _STAGE_BY_NODE = {
     "compliance_agent": "compliance",
 }
 
+_REPLY_HINTS = {
+    "intake": 'Tell the agent about your campaign -- channel and topic -- or say "never mind" to cancel.',
+    "ideation": 'Reply "approve", pick an angle (e.g. "the second one"), or describe what to change.',
+    "creation": 'Reply "approve", or describe how to revise the draft.',
+    "compliance": 'Reply "approve" to finalize, or describe what needs fixing.',
+}
+_FINISHED_HINT = "Campaign finished -- type a new message to start another one."
+
 
 def _recover_from_failure(exc: Exception, config: dict) -> dict:
     """PRD §11.4 -- called when a node's RetryPolicy exhausts every
@@ -154,6 +162,15 @@ def _final_content_update(final_content: Optional[dict]):
     return gr.update(value=_plain_text(final_content), visible=True)
 
 
+def _reply_hint(result: dict) -> str:
+    """PRD §11.8 -- with zero buttons anywhere in the UI, this is the only
+    affordance for what kind of reply is expected at the current stage."""
+    if "__interrupt__" in result:
+        stage = result["__interrupt__"][0].value.get("stage")
+        return _REPLY_HINTS.get(stage, "")
+    return _FINISHED_HINT
+
+
 def _persist_campaign(config: dict, history: list, result: dict) -> None:
     """PRD §11.7 -- called after every real turn (not on the bare intake
     greeting from _on_load, to avoid littering the list with abandoned
@@ -215,6 +232,7 @@ def _send_message(message: str, thread_id: Optional[str], history: list, request
                 cleared,
                 _campaign_choices(request.username),
                 _final_content_update(result.get("final_content")),
+                _reply_hint(result),
             )
     else:
         config = {"configurable": {"thread_id": thread_id}}
@@ -232,6 +250,7 @@ def _send_message(message: str, thread_id: Optional[str], history: list, request
         cleared,
         _campaign_choices(request.username),
         _final_content_update(result.get("final_content")),
+        _reply_hint(result),
     )
 
 
@@ -252,10 +271,21 @@ def _resume_campaign(thread_id: Optional[str]):
     if campaign is None:
         raise gr.Error("That campaign could not be found.")
     resumable_thread_id = thread_id if campaign["status"] == "in_progress" else None
+
     final_content = None
     if campaign["status"] == "approved":
         final_content = _app.get_state({"configurable": {"thread_id": thread_id}}).values.get("final_content")
-    return campaign["chat_history"], resumable_thread_id, "", _final_content_update(final_content)
+
+    if resumable_thread_id is None:
+        hint = _FINISHED_HINT
+    else:
+        state = _app.get_state({"configurable": {"thread_id": thread_id}})
+        if "collect_request" in (state.next or ()):
+            hint = _REPLY_HINTS["intake"]
+        else:
+            hint = _REPLY_HINTS.get(state.values.get("stage"), "")
+
+    return campaign["chat_history"], resumable_thread_id, "", _final_content_update(final_content), hint
 
 
 def _on_load(request: gr.Request):
@@ -269,7 +299,14 @@ def _on_load(request: gr.Request):
     except Exception as e:
         result = _recover_from_failure(e, config)
     history, thread_id, _ = _append_result(result, thread_id, [])
-    return client_id_msg, history, thread_id, _campaign_choices(request.username), _final_content_update(None)
+    return (
+        client_id_msg,
+        history,
+        thread_id,
+        _campaign_choices(request.username),
+        _final_content_update(None),
+        _reply_hint(result),
+    )
 
 
 def build_app() -> gr.Blocks:
@@ -298,14 +335,20 @@ def build_app() -> gr.Blocks:
             )
             send_btn = gr.Button("Send", scale=1)
 
-        demo.load(_on_load, outputs=[client_id_md, chatbot, thread_state, campaign_dd, final_content_tb])
+        reply_hint_md = gr.Markdown()
 
-        io = [chatbot, thread_state, msg_tb, campaign_dd, final_content_tb]
+        demo.load(
+            _on_load, outputs=[client_id_md, chatbot, thread_state, campaign_dd, final_content_tb, reply_hint_md]
+        )
+
+        io = [chatbot, thread_state, msg_tb, campaign_dd, final_content_tb, reply_hint_md]
         msg_tb.submit(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
         send_btn.click(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
 
         campaign_dd.change(
-            _resume_campaign, inputs=[campaign_dd], outputs=[chatbot, thread_state, msg_tb, final_content_tb]
+            _resume_campaign,
+            inputs=[campaign_dd],
+            outputs=[chatbot, thread_state, msg_tb, final_content_tb, reply_hint_md],
         )
 
     return demo

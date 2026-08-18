@@ -15,12 +15,12 @@ def _start(message, history=None):
     always interrupts first regardless. One-shot intake message ("push
     channel, topic: ...") resolves in a single turn per conftest.py's fake
     extraction LLM, landing on the first ideation interrupt."""
-    history, thread_id, cleared, _dd, _fc = _send_message(message, None, history or [], FakeRequest())
+    history, thread_id, cleared, _dd, _fc, _hint = _send_message(message, None, history or [], FakeRequest())
     return history, thread_id, cleared
 
 
 def _send(message, thread_id, history):
-    history, thread_id, cleared, _dd, _fc = _send_message(message, thread_id, history, FakeRequest())
+    history, thread_id, cleared, _dd, _fc, _hint = _send_message(message, thread_id, history, FakeRequest())
     return history, thread_id, cleared
 
 
@@ -257,7 +257,9 @@ def test_campaign_status_updates_to_approved_on_completion():
 
 
 def test_campaign_dropdown_choices_refresh_after_sending(monkeypatch):
-    _, thread_id, _, dd_update, _fc = _send_message("push channel, topic: first one", None, [], FakeRequest())
+    _, thread_id, _, dd_update, _fc, _hint = _send_message(
+        "push channel, topic: first one", None, [], FakeRequest()
+    )
     choices = dd_update["choices"] if isinstance(dd_update, dict) else dd_update.choices
     values = [v for _label, v in choices]
     assert thread_id in values
@@ -265,7 +267,7 @@ def test_campaign_dropdown_choices_refresh_after_sending(monkeypatch):
 
 def test_resume_campaign_loads_stored_history_and_keeps_thread_id_if_in_progress():
     history, thread_id, _ = _start("push channel, topic: flash sale")
-    loaded_history, resumed_thread_id, cleared, _fc = _resume_campaign(thread_id)
+    loaded_history, resumed_thread_id, cleared, _fc, _hint = _resume_campaign(thread_id)
     assert loaded_history == history
     assert resumed_thread_id == thread_id
     assert cleared == ""
@@ -278,7 +280,7 @@ def test_resume_campaign_clears_thread_id_if_already_finished():
     history, thread_id, _ = _send("approve", thread_id, history)
     history, thread_id, _ = _send("approve", thread_id, history)
 
-    loaded_history, resumed_thread_id, _, _fc = _resume_campaign(real_thread_id)
+    loaded_history, resumed_thread_id, _, _fc, _hint = _resume_campaign(real_thread_id)
     assert loaded_history == history
     assert resumed_thread_id is None  # nothing left to resume -- next message starts fresh
 
@@ -287,7 +289,7 @@ def test_resume_campaign_clears_thread_id_if_already_finished():
 
 
 def test_final_content_box_hidden_while_in_progress():
-    _, _, _, _, fc_update = _send_message("push channel, topic: sale", None, [], FakeRequest())
+    _, _, _, _, fc_update, _hint = _send_message("push channel, topic: sale", None, [], FakeRequest())
     assert fc_update["visible"] is False
 
 
@@ -295,7 +297,7 @@ def test_final_content_box_shows_plain_text_on_approval():
     history, thread_id, _ = _start("push channel, topic: sale")
     history, thread_id, _ = _send("approve", thread_id, history)
     history, thread_id, _ = _send("approve", thread_id, history)
-    _, _, _, _dd, fc_update = _send_message("approve", thread_id, history, FakeRequest())
+    _, _, _, _dd, fc_update, _hint = _send_message("approve", thread_id, history, FakeRequest())
     assert fc_update["visible"] is True
     assert "Title" in fc_update["value"] or "Body" in fc_update["value"]
     assert "**" not in fc_update["value"]  # plain text, not markdown
@@ -303,7 +305,7 @@ def test_final_content_box_shows_plain_text_on_approval():
 
 def test_final_content_box_hidden_on_rejection():
     history, thread_id, _ = _start("push channel, topic: sale")
-    _, _, _, _, fc_update = _send_message("cancel this, reject it", thread_id, history, FakeRequest())
+    _, _, _, _, fc_update, _hint = _send_message("cancel this, reject it", thread_id, history, FakeRequest())
     assert fc_update["visible"] is False
 
 
@@ -314,7 +316,7 @@ def test_resume_campaign_restores_final_content_for_approved_campaign():
     history, thread_id, _ = _send("approve", thread_id, history)
     history, thread_id, _ = _send("approve", thread_id, history)
 
-    _, _, _, fc_update = _resume_campaign(real_thread_id)
+    _, _, _, fc_update, _hint = _resume_campaign(real_thread_id)
     assert fc_update["visible"] is True
     assert "Body" in fc_update["value"] or "Title" in fc_update["value"]
 
@@ -327,3 +329,40 @@ def test_resume_campaign_requires_a_selection():
 def test_resume_campaign_errors_on_unknown_thread_id():
     with pytest.raises(gr.Error):
         _resume_campaign("not-a-real-thread-id")
+
+
+# --- ambient reply hints (PRD §11.8) -----------------------------------------
+
+
+def test_reply_hint_present_at_intake_stage():
+    _, _, _, _, _fc, hint = _send_message("topic: sale", None, [], FakeRequest())
+    assert "channel" in hint.lower() or "topic" in hint.lower()
+
+
+def test_reply_hint_present_at_ideation_stage():
+    _, _, _, _dd, _fc, hint = _send_message("push channel, topic: sale2", None, [], FakeRequest())
+    assert "angle" in hint.lower() or "approve" in hint.lower()
+
+
+def test_reply_hint_changes_across_stages():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    _, _, _, _, _fc, ideation_hint = _send_message("push channel, topic: sale3", None, [], FakeRequest())
+
+    history, thread_id, _ = _send("approve", thread_id, history)
+    _, _, _, _dd, _fc, creation_hint = _send_message("approve", thread_id, history, FakeRequest())
+
+    assert ideation_hint != creation_hint
+
+
+def test_reply_hint_is_finished_message_after_approval():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    history, thread_id, _ = _send("approve", thread_id, history)
+    history, thread_id, _ = _send("approve", thread_id, history)
+    _, _, _, _, _fc, hint = _send_message("approve", thread_id, history, FakeRequest())
+    assert "finished" in hint.lower()
+
+
+def test_resume_campaign_reply_hint_reflects_current_stage():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    _, _, _, _fc, hint = _resume_campaign(thread_id)
+    assert "angle" in hint.lower() or "approve" in hint.lower()
