@@ -58,6 +58,23 @@ class _FakeBriefLLM:
         )
 
 
+class _FakeToolLLM:
+    """Stands in for ideation_agent's tool-calling loop LLM (PRD §11.6).
+    bind_tools() returns self so the loop's `.bind_tools(tools).invoke(...)`
+    call works unchanged. By default makes zero tool calls, exercising the
+    node's own fallback-fetch path -- matching a model that (correctly)
+    decided nothing needed fetching, or one that just didn't call anything;
+    either way the node's output must not depend on which happened."""
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content="done")
+
+    def bind_tools(self, tools):
+        return self
+
+
 class _FakeAngleLLM:
     def invoke(self, prompt):
         from content_agent.nodes.ideation import _AngleSelection
@@ -152,6 +169,7 @@ def _fake_llms(monkeypatch):
     monkeypatch these further for their own assertions."""
     monkeypatch.setattr("content_agent.tools.brief._structured_llm", _FakeBriefLLM())
     monkeypatch.setattr("content_agent.nodes.ideation._structured_llm", _FakeAngleLLM())
+    monkeypatch.setattr("content_agent.nodes.ideation._tool_llm", _FakeToolLLM())
     monkeypatch.setattr(
         "content_agent.nodes.creation._structured_llms",
         {"whatsapp": _FakeCreationLLM("whatsapp"), "push": _FakeCreationLLM("push")},
