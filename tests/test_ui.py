@@ -1,11 +1,20 @@
 import gradio as gr
 import pytest
 
-from content_agent.ui import _bullets, _format_agent_message, _start_campaign, _submit_message
+from content_agent.ui import _bullets, _format_agent_message, _send_message
 
 
 class FakeRequest:
     username = "acme"
+
+
+def _start(message, history=None):
+    """PRD §11.1 -- thread_id=None means _send_message starts a fresh
+    thread AND immediately resumes it with `message`, since collect_request
+    always interrupts first regardless. One-shot intake message ("push
+    channel, topic: ...") resolves in a single turn per conftest.py's fake
+    extraction LLM, landing on the first ideation interrupt."""
+    return _send_message(message, None, history or [], FakeRequest())
 
 
 def test_bullets_formats_dict_skips_none_and_joins_lists():
@@ -18,6 +27,19 @@ def test_bullets_formats_dict_skips_none_and_joins_lists():
 
 def test_bullets_empty_dict():
     assert _bullets({}) == "- (none)"
+
+
+def test_format_agent_message_intake_prompts_for_missing_info_first_time():
+    payload = {"stage": "intake", "pending_channel": None, "pending_campaign_topic": None}
+    msg = _format_agent_message(payload)
+    assert "Tell me about the campaign" in msg
+
+
+def test_format_agent_message_intake_shows_what_is_already_known():
+    payload = {"stage": "intake", "pending_channel": None, "pending_campaign_topic": "end of season sale"}
+    msg = _format_agent_message(payload)
+    assert "- **Topic:** end of season sale" in msg
+    assert "channel" in msg.lower()
 
 
 def test_format_agent_message_ideation_shows_three_options_with_recommendation_flagged():
@@ -81,63 +103,77 @@ def test_format_agent_message_no_node_error_has_no_warning_prefix():
     assert "Something went wrong" not in msg
 
 
-def test_start_campaign_produces_agent_message_on_right():
-    history, thread_id, stage, cleared = _start_campaign("whatsapp", "sale", FakeRequest())
+def test_send_message_requires_nonempty_text():
+    with pytest.raises(gr.Error):
+        _send_message("   ", None, [], FakeRequest())
+
+
+def test_first_message_starts_a_campaign_and_reaches_ideation():
+    history, thread_id, cleared = _start("push channel, topic: flash sale")
     assert history[0]["role"] == "assistant"  # human's kickoff, left
     assert history[1]["role"] == "user"  # agent output, right
-    assert stage == "ideation"
     assert thread_id is not None
     assert cleared == ""
+    assert "Proposed angles" in history[-1]["content"]
 
 
-def test_start_campaign_requires_topic():
-    with pytest.raises(gr.Error):
-        _start_campaign("whatsapp", "  ", FakeRequest())
+def test_intake_accumulates_across_turns_before_reaching_ideation():
+    history, thread_id, _ = _start("topic: end of season sale")
+    assert "channel" in history[-1]["content"].lower()
 
-
-def test_submit_message_requires_active_thread():
-    with pytest.raises(gr.Error):
-        _submit_message("approve", None, None, [])
-
-
-def test_submit_message_requires_nonempty_text():
-    history, thread_id, stage, _ = _start_campaign("whatsapp", "sale", FakeRequest())
-    with pytest.raises(gr.Error):
-        _submit_message("   ", thread_id, stage, history)
+    history, thread_id, _ = _send_message("whatsapp", thread_id, history, FakeRequest())
+    assert "Proposed angles" in history[-1]["content"]
 
 
 def test_free_text_approve_chain_reaches_final_content():
-    history, thread_id, stage, _ = _start_campaign("push", "flash sale", FakeRequest())
-    assert stage == "ideation"
+    history, thread_id, _ = _start("push channel, topic: flash sale")
 
-    history, thread_id, stage, _ = _submit_message("looks great, approve", thread_id, stage, history)
-    assert stage == "creation"
+    history, thread_id, _ = _send_message("looks great, approve", thread_id, history, FakeRequest())
     assert history[-2]["role"] == "assistant"  # human message, left
     assert history[-1]["role"] == "user"  # next agent output, right
+    assert "Draft content" in history[-1]["content"]
 
-    history, thread_id, stage, _ = _submit_message("approve", thread_id, stage, history)
-    assert stage == "compliance"
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    assert "Compliance review" in history[-1]["content"]
 
-    history, thread_id, stage, _ = _submit_message("approve", thread_id, stage, history)
-    assert stage is None  # run finished
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    assert thread_id is None  # run finished -- next message starts fresh
     assert "Approved" in history[-1]["content"]
 
 
 def test_free_text_edit_loops_back():
-    history, thread_id, stage, _ = _start_campaign("whatsapp", "sale", FakeRequest())
-    history, thread_id, stage, _ = _submit_message("approve", thread_id, stage, history)
-    assert stage == "creation"
+    history, thread_id, _ = _start("whatsapp channel, topic: sale")
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    assert "Draft content" in history[-1]["content"]
 
-    history, thread_id, stage, _ = _submit_message("please make it shorter and punchier", thread_id, stage, history)
-    assert stage == "creation"  # looped back, re-interrupted at same stage
-    assert "revised" in history[-1]["content"]
+    history, thread_id, _ = _send_message("please make it shorter and punchier", thread_id, history, FakeRequest())
+    assert "revised" in history[-1]["content"]  # looped back, re-interrupted at same stage
 
 
 def test_free_text_reject_ends_run_with_no_final_content():
-    history, thread_id, stage, _ = _start_campaign("push", "sale", FakeRequest())
-    history, thread_id, stage, _ = _submit_message("cancel this, reject it", thread_id, stage, history)
-    assert stage is None
+    history, thread_id, _ = _start("push channel, topic: sale")
+    history, thread_id, _ = _send_message("cancel this, reject it", thread_id, history, FakeRequest())
+    assert thread_id is None
     assert "Rejected" in history[-1]["content"]
+
+
+def test_intake_cancel_ends_run_with_no_final_content():
+    history, thread_id, _ = _start("actually never mind, forget it")
+    assert thread_id is None
+    assert "Rejected" in history[-1]["content"]
+
+
+def test_a_finished_run_lets_the_next_message_start_a_new_campaign():
+    history, thread_id, _ = _start("push channel, topic: sale")
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
+    assert thread_id is None
+
+    # next message starts a brand new campaign from scratch
+    history, thread_id, _ = _send_message("whatsapp channel, topic: another sale", thread_id, history, FakeRequest())
+    assert thread_id is not None
+    assert "Proposed angles" in history[-1]["content"]
 
 
 class _AlwaysFailsLLM:
@@ -165,8 +201,7 @@ def test_recovers_from_a_node_failure_and_can_continue(monkeypatch):
     human says (draft_content was never actually produced) -- swapping
     back to a working LLM proves the retry actually succeeds and the run
     continues normally."""
-    history, thread_id, stage, _ = _start_campaign("whatsapp", "sale", FakeRequest())
-    assert stage == "ideation"
+    history, thread_id, _ = _start("whatsapp channel, topic: sale")
 
     # break content_creation_agent BEFORE it's ever invoked -- approving
     # here is what first routes into it.
@@ -174,8 +209,7 @@ def test_recovers_from_a_node_failure_and_can_continue(monkeypatch):
         "content_agent.nodes.creation._structured_llms",
         {"whatsapp": _AlwaysFailsLLM(), "push": _AlwaysFailsLLM()},
     )
-    history, thread_id, stage, _ = _submit_message("approve", thread_id, stage, history)
-    assert stage == "creation"  # re-interrupted at the stage it would have produced
+    history, thread_id, _ = _send_message("approve", thread_id, history, FakeRequest())
     assert "Something went wrong" in history[-1]["content"]
     assert "simulated content_creation_agent failure" in history[-1]["content"]
 
@@ -183,7 +217,6 @@ def test_recovers_from_a_node_failure_and_can_continue(monkeypatch):
         "content_agent.nodes.creation._structured_llms",
         {"whatsapp": _WorkingCreationLLM(), "push": _WorkingCreationLLM()},
     )
-    history, thread_id, stage, _ = _submit_message("okay try again", thread_id, stage, history)
-    assert stage == "creation"
+    history, thread_id, _ = _send_message("okay try again", thread_id, history, FakeRequest())
     assert "Something went wrong" not in history[-1]["content"]
     assert "recovered draft" in history[-1]["content"]

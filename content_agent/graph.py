@@ -4,12 +4,14 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import RetryPolicy, default_retry_on
 
 from content_agent.nodes.classify_decision import classify_decision
+from content_agent.nodes.collect_request import collect_request
 from content_agent.nodes.compliance import compliance_agent
 from content_agent.nodes.creation import content_creation_agent
 from content_agent.nodes.human_review import human_review
 from content_agent.nodes.ideation import ideation_agent
+from content_agent.nodes.parse_request import parse_request
 from content_agent.observability import get_tracer, track_langgraph
-from content_agent.routing import route_after_review
+from content_agent.routing import route_after_intake, route_after_review
 from content_agent.state import AgentState
 
 
@@ -45,6 +47,8 @@ def _rejected(state: AgentState) -> dict:
 def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
+    graph.add_node("collect_request", collect_request)
+    graph.add_node("parse_request", parse_request, retry_policy=_RETRY_POLICY)
     graph.add_node("ideation_agent", ideation_agent, retry_policy=_RETRY_POLICY)
     graph.add_node("content_creation_agent", content_creation_agent, retry_policy=_RETRY_POLICY)
     graph.add_node("compliance_agent", compliance_agent, retry_policy=_RETRY_POLICY)
@@ -53,7 +57,18 @@ def build_graph() -> StateGraph:
     graph.add_node("approved", _approved)
     graph.add_node("rejected", _rejected)
 
-    graph.set_entry_point("ideation_agent")
+    graph.set_entry_point("collect_request")
+    graph.add_edge("collect_request", "parse_request")
+    graph.add_conditional_edges(
+        "parse_request",
+        route_after_intake,
+        {
+            "collect_request": "collect_request",
+            "ideation_agent": "ideation_agent",
+            "rejected": "rejected",
+        },
+    )
+
     graph.add_edge("ideation_agent", "human_review")
     graph.add_edge("content_creation_agent", "human_review")
     graph.add_edge("compliance_agent", "human_review")

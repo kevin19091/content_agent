@@ -10,7 +10,12 @@ class ContentRequest(TypedDict):
 
 
 class AgentState(TypedDict):
-    request: ContentRequest
+    client_id: Optional[str]
+    raw_intake: Optional[str]
+    pending_channel: Optional[Literal["whatsapp", "push"]]
+    pending_campaign_topic: Optional[str]
+    intake_cancelled: Optional[bool]
+    request: Optional[ContentRequest]
     brand_guidelines: Optional[dict]
     brief: Optional[dict]
     angle: Optional[str]

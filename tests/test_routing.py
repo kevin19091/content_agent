@@ -1,4 +1,36 @@
-from content_agent.routing import route_after_review
+from content_agent.routing import route_after_intake, route_after_review
+
+
+def _intake_state(**overrides):
+    base = {
+        "pending_channel": None,
+        "pending_campaign_topic": None,
+        "intake_cancelled": None,
+        "node_error": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_intake_node_error_routes_back_to_collect_request():
+    result = route_after_intake(_intake_state(node_error="boom"))
+    assert result == "collect_request"
+
+
+def test_intake_cancelled_routes_to_rejected():
+    result = route_after_intake(_intake_state(intake_cancelled=True))
+    assert result == "rejected"
+
+
+def test_intake_incomplete_routes_back_to_collect_request():
+    assert route_after_intake(_intake_state(pending_channel="push")) == "collect_request"
+    assert route_after_intake(_intake_state(pending_campaign_topic="sale")) == "collect_request"
+    assert route_after_intake(_intake_state()) == "collect_request"
+
+
+def test_intake_complete_routes_to_ideation_agent():
+    result = route_after_intake(_intake_state(pending_channel="push", pending_campaign_topic="sale"))
+    assert result == "ideation_agent"
 
 
 def _state(**overrides):

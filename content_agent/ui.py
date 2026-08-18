@@ -26,9 +26,10 @@ def _recover_from_failure(exc: Exception, config: dict) -> dict:
     """PRD §11.4 -- called when a node's RetryPolicy exhausts every
     attempt and the exception escapes invoke(). Finds which node was
     executing (no hardcoding), injects the failure as if that node had
-    produced it, and continues -- lands back on human_review's interrupt
-    through the graph's own edges, same rendering path as any normal
-    turn (see _format_agent_message's node_error handling)."""
+    produced it, and continues -- lands back on an interrupt (human_review
+    or, during intake, collect_request) through the graph's own edges,
+    same rendering path as any normal turn (see _format_agent_message's
+    node_error handling)."""
     failed_node = _app.get_state(config).next[0]
     values = {"node_error": str(exc), "node_error_source": failed_node}
     if failed_node in _STAGE_BY_NODE:
@@ -57,6 +58,24 @@ def _format_agent_message(payload: dict) -> str:
 
     node_error = payload.get("node_error")
     prefix = f"⚠️ **Something went wrong** (after 3 attempts)\n{node_error}\n\n---\n\n" if node_error else ""
+
+    if stage == "intake":
+        pending_channel = payload.get("pending_channel")
+        pending_topic = payload.get("pending_campaign_topic")
+        if not pending_channel and not pending_topic:
+            body = (
+                "Tell me about the campaign you'd like to run -- what's it "
+                "about, and which channel (WhatsApp or push)?"
+            )
+        else:
+            known = []
+            if pending_channel:
+                known.append(f"- **Channel:** {pending_channel}")
+            if pending_topic:
+                known.append(f"- **Topic:** {pending_topic}")
+            missing = "channel (WhatsApp or push)" if not pending_channel else "campaign topic"
+            body = "Got it so far:\n" + "\n".join(known) + f"\n\nWhat's the {missing}?"
+        return prefix + body
 
     if stage == "ideation":
         angle_options = payload.get("angle_options") or []
@@ -88,60 +107,51 @@ def _format_agent_message(payload: dict) -> str:
 
 def _authenticate(username: str, password: str) -> bool:
     """PRD §8, §9 -- client_name + one shared password for all clients, v1
-    only. The username becomes client_id for the session; it isn't checked
-    against the DB here -- an unknown client surfaces as a clear error when
-    a campaign is started instead (see _start_campaign)."""
+    only. The username becomes client_id for the session."""
     return bool(username) and password == _SHARED_PASSWORD
 
 
 def _append_result(result: dict, thread_id: str, history: list):
     """Agent turns render on the right (role='user' in Gradio's chat
-    convention) -- human turns render on the left (role='assistant')."""
+    convention) -- human turns render on the left (role='assistant').
+    Returns thread_id=None once a run finishes (approved/rejected) so the
+    next message starts a fresh campaign instead of trying to resume a
+    thread with nothing left to resume."""
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
         history = history + [{"role": "user", "content": _format_agent_message(payload)}]
-        return history, thread_id, payload["stage"], ""
+        return history, thread_id, ""
 
     if result.get("final_content") is not None:
         msg = "✅ **Approved** -- final content persisted, ready for delivery:\n" + _bullets(result["final_content"])
     else:
         msg = "⛔ **Rejected** -- no content persisted. Logged + client notified."
     history = history + [{"role": "user", "content": msg}]
-    return history, thread_id, None, ""
+    return history, None, ""
 
 
-def _start_campaign(channel: str, campaign_topic: str, request: gr.Request):
-    if not campaign_topic or not campaign_topic.strip():
-        raise gr.Error("Campaign topic is required.")
-
-    client_id = request.username
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
-
-    history = [{"role": "assistant", "content": f"Start a **{channel}** campaign: {campaign_topic}"}]
-
-    try:
-        result = _app.invoke(
-            {"request": {"client_id": client_id, "channel": channel, "campaign_topic": campaign_topic}},
-            config=config,
-        )
-    except ValueError as e:
-        raise gr.Error(str(e))
-    except Exception as e:
-        result = _recover_from_failure(e, config)
-
-    return _append_result(result, thread_id, history)
-
-
-def _submit_message(message: str, thread_id: Optional[str], stage: Optional[str], history: list):
-    if not thread_id or not stage:
-        raise gr.Error("Start a campaign first.")
+def _send_message(message: str, thread_id: Optional[str], history: list, request: gr.Request):
+    """PRD §11.1 -- one text box for the whole session. No active thread
+    -> this message starts a brand new campaign (client_id from login,
+    never from free text); otherwise it resumes whatever's currently
+    interrupted, whether that's collect_request (intake) or human_review
+    (review loop) -- the graph itself resolves which."""
     if not message or not message.strip():
         raise gr.Error("Type a message first.")
 
     history = history + [{"role": "assistant", "content": message}]
 
-    config = {"configurable": {"thread_id": thread_id}}
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            _app.invoke({"client_id": request.username}, config=config)  # reaches collect_request's interrupt
+        except Exception as e:
+            result = _recover_from_failure(e, config)
+            return _append_result(result, thread_id, history)
+    else:
+        config = {"configurable": {"thread_id": thread_id}}
+
     try:
         result = _app.invoke(Command(resume=message), config=config)
     except Exception as e:
@@ -151,7 +161,17 @@ def _submit_message(message: str, thread_id: Optional[str], stage: Optional[str]
 
 
 def _on_load(request: gr.Request):
-    return f"Signed in as **{request.username}** (used as `client_id`)"
+    """Eagerly starts a thread and reaches collect_request's interrupt so
+    the greeting shows immediately, before the human types anything."""
+    client_id_msg = f"Signed in as **{request.username}** (used as `client_id`)"
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        result = _app.invoke({"client_id": request.username}, config=config)
+    except Exception as e:
+        result = _recover_from_failure(e, config)
+    history, thread_id, _ = _append_result(result, thread_id, [])
+    return client_id_msg, history, thread_id
 
 
 def build_app() -> gr.Blocks:
@@ -160,29 +180,22 @@ def build_app() -> gr.Blocks:
         client_id_md = gr.Markdown()
 
         thread_state = gr.State(None)
-        stage_state = gr.State(None)
-
-        with gr.Accordion("New campaign", open=True):
-            channel_dd = gr.Dropdown(["whatsapp", "push"], value="whatsapp", label="Channel")
-            topic_tb = gr.Textbox(label="Campaign topic", placeholder="e.g. end of season clearance sale")
-            start_btn = gr.Button("Start campaign", variant="primary")
 
         chatbot = gr.Chatbot(label="Review", height=500)
 
         with gr.Row():
             msg_tb = gr.Textbox(
-                placeholder='Message the agent... e.g. "approve", "make it punchier", "reject this"',
+                placeholder='Message the agent... e.g. "a whatsapp sale campaign", "approve", "make it punchier"',
                 scale=8,
                 show_label=False,
             )
             send_btn = gr.Button("Send", scale=1)
 
-        demo.load(_on_load, outputs=[client_id_md])
+        demo.load(_on_load, outputs=[client_id_md, chatbot, thread_state])
 
-        io = [chatbot, thread_state, stage_state, msg_tb]
-        start_btn.click(_start_campaign, inputs=[channel_dd, topic_tb], outputs=io)
-        msg_tb.submit(_submit_message, inputs=[msg_tb, thread_state, stage_state, chatbot], outputs=io)
-        send_btn.click(_submit_message, inputs=[msg_tb, thread_state, stage_state, chatbot], outputs=io)
+        io = [chatbot, thread_state, msg_tb]
+        msg_tb.submit(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
+        send_btn.click(_send_message, inputs=[msg_tb, thread_state, chatbot], outputs=io)
 
     return demo
 

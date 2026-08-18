@@ -71,6 +71,30 @@ class _FakeComplianceLLM:
         return ComplianceResult(passed=True, issues=[], severity="none")
 
 
+class _FakeExtractionLLM:
+    """Crude keyword-based stand-in for parse_request's free-text ->
+    channel/campaign_topic extractor. Test messages use an explicit
+    "topic: ..." marker rather than trying to fake real NL understanding."""
+
+    def invoke(self, prompt):
+        from content_agent.nodes.parse_request import _RequestExtraction
+
+        try:
+            message = prompt.split('message:\n\n"', 1)[1].rsplit('"\n\nExtract', 1)[0]
+        except IndexError:
+            message = prompt
+        lowered = message.lower()
+        if "never mind" in lowered or "cancel" in lowered or "forget it" in lowered:
+            return _RequestExtraction(cancelled=True)
+
+        channel = "whatsapp" if "whatsapp" in lowered else ("push" if "push" in lowered else None)
+        topic = None
+        if "topic:" in lowered:
+            idx = lowered.index("topic:")
+            topic = message[idx + len("topic:") :].strip()
+        return _RequestExtraction(channel=channel, campaign_topic=topic)
+
+
 class _FakeDecisionLLM:
     """Crude keyword-based stand-in for the UI's free-text ->
     approve/edit/reject classifier. The real one uses an LLM; tests just
@@ -117,3 +141,4 @@ def _fake_llms(monkeypatch):
     )
     monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _FakeComplianceLLM())
     monkeypatch.setattr("content_agent.nodes.classify_decision._structured_llm", _FakeDecisionLLM())
+    monkeypatch.setattr("content_agent.nodes.parse_request._structured_llm", _FakeExtractionLLM())

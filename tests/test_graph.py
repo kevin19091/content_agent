@@ -1,7 +1,9 @@
 """Exercises the graph's routing end-to-end -- real node functions, real
 classify_decision node, with every LLM call faked via conftest.py's
 autouse fixture. Confirms human_review/classify_decision resolve
-approve/edit/reject correctly at all three stages (PRD §11.2)."""
+approve/edit/reject correctly at all three stages (PRD §11.2), and that
+collect_request/parse_request resolve free-text intake before ideation
+ever runs (PRD §11.1)."""
 
 import itertools
 
@@ -18,16 +20,28 @@ def make_app():
     return compile_app(checkpointer=MemorySaver())
 
 
+def _new_config():
+    return {"configurable": {"thread_id": f"t{next(_counter)}"}}
+
+
+def start(app, config, intake_message="push channel, topic: sale"):
+    """Runs the graph from a fresh thread through intake in one shot
+    (the fake extraction LLM resolves channel+topic from a single
+    well-formed message -- see conftest.py), landing on the first
+    ideation interrupt. Dedicated intake tests below drive collect_request
+    /parse_request directly instead of using this shortcut."""
+    result = app.invoke({"client_id": "acme"}, config=config)
+    assert result["__interrupt__"][0].value["stage"] == "intake"
+    return app.invoke(Command(resume=intake_message), config=config)
+
+
 def run(app, decisions):
-    """Drive the graph to completion, resuming with raw text messages from
-    `decisions` in order whenever it interrupts -- classify_decision (a
-    real graph node now) interprets each one via the fake decision LLM
-    from conftest.py. Returns (final_state, stages_seen)."""
-    config = {"configurable": {"thread_id": f"t{next(_counter)}"}}
-    result = app.invoke(
-        {"request": {"client_id": "acme", "channel": "push", "campaign_topic": "sale"}},
-        config=config,
-    )
+    """Resolves intake with a canned one-shot message, then drives the
+    review loop to completion, resuming with raw text messages from
+    `decisions` in order whenever it interrupts. Returns (final_state,
+    stages_seen) -- stages_seen only covers the review loop, not intake."""
+    config = _new_config()
+    result = start(app, config)
     stages_seen = []
     step = 0
     while "__interrupt__" in result:
@@ -91,12 +105,9 @@ def test_ideation_offers_three_angles_and_a_non_default_pick_is_honored():
     one is data on the approve action, not a fresh ideation_agent call
     (angle changes but angle_options doesn't -- same three options)."""
     app = make_app()
-    config = {"configurable": {"thread_id": "angle-pick-test"}}
+    config = _new_config()
 
-    result = app.invoke(
-        {"request": {"client_id": "acme", "channel": "push", "campaign_topic": "sale"}},
-        config=config,
-    )
+    result = start(app, config)
     payload = result["__interrupt__"][0].value
     assert payload["angle_options"] == ["stub angle", "stub angle B", "stub angle C"]
     assert payload["angle"] == "stub angle"  # the recommendation, angle_options[0]
@@ -128,3 +139,69 @@ def test_multiple_edits_in_a_row_at_same_stage():
     result, stages = run(app, ["make it punchier", "try again", "approve", "approve", "approve"])
     assert stages == ["ideation", "ideation", "ideation", "creation", "compliance"]
     assert result["final_content"] is not None
+
+
+# --- intake (PRD §11.1) ---------------------------------------------------
+
+
+def test_intake_accumulates_across_turns_instead_of_re_asking():
+    app = make_app()
+    config = _new_config()
+
+    result = app.invoke({"client_id": "acme"}, config=config)
+    assert result["__interrupt__"][0].value["stage"] == "intake"
+
+    # topic only, first turn
+    result = app.invoke(Command(resume="topic: end of season sale"), config=config)
+    payload = result["__interrupt__"][0].value
+    assert payload["stage"] == "intake"
+    assert payload["pending_campaign_topic"] == "end of season sale"
+    assert payload["pending_channel"] is None  # still missing, asked again
+
+    # channel only, second turn -- topic from turn 1 must not be lost
+    result = app.invoke(Command(resume="whatsapp"), config=config)
+    assert result["__interrupt__"][0].value["stage"] == "ideation"  # resolved, moved on
+    state = app.get_state(config).values
+    assert state["request"] == {
+        "client_id": "acme",
+        "channel": "whatsapp",
+        "campaign_topic": "end of season sale",
+    }
+
+
+def test_intake_resolves_in_one_shot_when_both_given_together():
+    app = make_app()
+    config = _new_config()
+    app.invoke({"client_id": "acme"}, config=config)
+    result = app.invoke(Command(resume="push channel, topic: flash sale"), config=config)
+    assert result["__interrupt__"][0].value["stage"] == "ideation"
+
+
+def test_intake_cancel_ends_run_with_no_final_content():
+    app = make_app()
+    config = _new_config()
+    app.invoke({"client_id": "acme"}, config=config)
+    result = app.invoke(Command(resume="actually never mind, cancel this"), config=config)
+    assert "__interrupt__" not in result
+    assert result["final_content"] is None
+
+
+def test_intake_cancel_after_partial_info_still_ends_cleanly():
+    app = make_app()
+    config = _new_config()
+    app.invoke({"client_id": "acme"}, config=config)
+    app.invoke(Command(resume="topic: end of season sale"), config=config)
+    result = app.invoke(Command(resume="forget it"), config=config)
+    assert "__interrupt__" not in result
+    assert result["final_content"] is None
+
+
+def test_client_id_comes_from_login_never_from_free_text():
+    """client_id is set once, at kickoff, from the login username -- never
+    extracted from the intake message even if it looks like it could be."""
+    app = make_app()
+    config = _new_config()
+    app.invoke({"client_id": "acme"}, config=config)
+    app.invoke(Command(resume="push channel, topic: sale, client_id: someone-else"), config=config)
+    state = app.get_state(config).values
+    assert state["request"]["client_id"] == "acme"

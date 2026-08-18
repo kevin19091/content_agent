@@ -40,3 +40,22 @@ def route_after_review(state: AgentState) -> str:
             return "approved"
 
     raise ValueError(f"unhandled (stage={stage!r}, decision={decision!r})")
+
+
+def route_after_intake(state: AgentState) -> str:
+    """PRD §11.1 -- parse_request's conditional edge. No cap on the
+    ask-again loop: missing info is a normal conversation, not a failure
+    (RetryPolicy covers the separate case of parse_request's own LLM call
+    actually erroring)."""
+    if state.get("node_error"):
+        # parse_request's own body never ran -- bypassed by
+        # update_state(as_node="parse_request", ...) during recovery.
+        return "collect_request"
+
+    if state.get("intake_cancelled"):
+        return "rejected"
+
+    if state.get("pending_channel") and state.get("pending_campaign_topic"):
+        return "ideation_agent"
+
+    return "collect_request"
