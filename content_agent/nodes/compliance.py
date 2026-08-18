@@ -10,6 +10,29 @@ _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 _structured_llm = _llm.with_structured_output(ComplianceResult)
 
 
+def _prohibited_word_findings(prohibited_words: list, draft: dict) -> str:
+    """Same principle as _channel_rules: exact substring presence is
+    100% computable, so compute it here and hand the model the finding as
+    a fact rather than asking it to re-scan the draft text itself. Tested
+    live and didn't find a bug here the way length-counting had one, but
+    it's the same category of risk -- a missed prohibited word is a real
+    brand/legal issue, not just a UX nit -- so it's not worth resting on
+    "seemed fine in a handful of tests" when computing it is nearly free."""
+    haystack = " ".join(str(v) for v in draft.values() if isinstance(v, str)).lower()
+    found = [w for w in prohibited_words if w.lower() in haystack]
+    if found:
+        return (
+            f"Prohibited word scan (already computed -- treat as ground truth, "
+            f"don't re-scan the draft yourself): FOUND {found!r} present in the "
+            "draft text. This is always a blocking issue."
+        )
+    return (
+        "Prohibited word scan (already computed -- treat as ground truth, "
+        "don't re-scan the draft yourself): none of the prohibited words are "
+        "present in the draft text."
+    )
+
+
 def _channel_rules(channel: str, draft: dict) -> str:
     """Character counts are computed here, in Python, and handed to the
     model as stated facts -- not left for the model to count from raw
@@ -58,13 +81,15 @@ def compliance_agent(state: AgentState) -> dict:
         f"Review this {channel} draft for brand and channel compliance.\n\n"
         f"Draft: {draft}\n\n"
         f"Brand tone rules: {guidelines['tone_rules']}\n"
-        f"Prohibited words (flag any use of these): {guidelines['prohibited_words']}\n"
+        f"{_prohibited_word_findings(guidelines['prohibited_words'], draft)}\n"
         f"Style guide: {guidelines['style_guide']}\n\n"
         f"{_channel_rules(channel, draft)}\n\n"
-        "List every issue found. Set severity to 'blocking' if any rule is "
-        "violated (prohibited word used, over a length limit, wrong "
-        "template category), 'minor' for tone/style suggestions that don't "
-        "violate a hard rule, or 'none' if there are no issues."
+        "List every issue found -- including the prohibited word finding "
+        "above, verbatim, if it found any. Set severity to 'blocking' if "
+        "any rule is violated (prohibited word present, over a length "
+        "limit, wrong template category), 'minor' for tone/style "
+        "suggestions that don't violate a hard rule, or 'none' if there "
+        "are no issues."
     )
 
     result = _structured_llm.invoke(prompt)

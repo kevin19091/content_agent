@@ -46,11 +46,62 @@ def test_prompt_includes_draft_guidelines_and_channel_rules(monkeypatch):
             return ComplianceResult(passed=True, issues=[], severity="none")
 
     monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _Recording())
-    compliance_agent(_base_state(channel="push"))
+    compliance_agent(_base_state(channel="push", draft_content={"title": "guarantee results", "body": "x"}))
 
     assert "guarantee" in captured["prompt"]
-    assert "free money" in captured["prompt"]
     assert "title must be at most 65 characters" in captured["prompt"]
+
+
+def test_prohibited_word_scan_is_computed_not_left_for_the_model_to_find(monkeypatch):
+    """Same principle as the length-count fix: exact substring presence
+    is 100% computable, so it's computed in Python and stated as a fact,
+    not left for the model to re-scan the draft text itself."""
+    captured = {}
+
+    class _Recording:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return ComplianceResult(passed=True, issues=[], severity="none")
+
+    monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _Recording())
+
+    compliance_agent(
+        _base_state(
+            channel="push",
+            draft_content={"title": "We guarantee big savings", "body": "shop now"},
+        )
+    )
+    assert "FOUND ['guarantee']" in captured["prompt"]
+    assert "always a blocking issue" in captured["prompt"]
+
+
+def test_prohibited_word_scan_reports_clean_when_nothing_found(monkeypatch):
+    captured = {}
+
+    class _Recording:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return ComplianceResult(passed=True, issues=[], severity="none")
+
+    monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _Recording())
+
+    compliance_agent(_base_state(channel="push", draft_content={"title": "Weekend deals", "body": "shop now"}))
+    assert "none of the prohibited words are present" in captured["prompt"]
+    assert "FOUND" not in captured["prompt"]
+
+
+def test_prohibited_word_scan_is_case_insensitive(monkeypatch):
+    captured = {}
+
+    class _Recording:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return ComplianceResult(passed=True, issues=[], severity="none")
+
+    monkeypatch.setattr("content_agent.nodes.compliance._structured_llm", _Recording())
+
+    compliance_agent(_base_state(channel="push", draft_content={"title": "GUARANTEE savings", "body": "x"}))
+    assert "FOUND ['guarantee']" in captured["prompt"]
 
 
 def test_whatsapp_and_push_get_different_channel_rules(monkeypatch):
